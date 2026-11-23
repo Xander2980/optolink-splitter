@@ -39,6 +39,11 @@ command_callback = None
 
 
 def on_connect(client, userdata, flags, reason_code, properties):
+    # haus-fixes: abgelehnten Connect nicht als "online" melden; nach Reconnect alles neu senden – upstream #261
+    if getattr(reason_code, 'is_failure', False):
+        logger.error(f"MQTT connect refused: {reason_code}")
+        return
+    reset_recent_list()
     # publish LWT online
     client.publish(settings.mqtt_topic + "/LWT" , "online", qos=0,  retain=True)
     # Subscribe to /set topics for writable datapoints
