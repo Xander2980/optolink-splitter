@@ -22,6 +22,7 @@ from c_settings_adapter import settings
 from logger_util import logger
 from c_polllist import poll_list
 import utils
+import requests_util   # haus-fixes: is_write_command()
 
 
 
@@ -77,8 +78,12 @@ def on_message(client, userdata, msg):
         rec = rec.replace(' ','').replace('\0','').replace('\n','').replace('\r','').replace('"','').replace("'","")
         if(command_callback) and command_callback(rec):
             pass
+        elif (not settings.cmnd_write_allowed) and requests_util.is_write_command(rec):
+            # haus-fixes: Schreibbefehle ueber das cmnd-Topic gesperrt (/set bleibt moeglich)
+            logger.warning(f"MQTT write command rejected (cmnd_write_allowed=False): {rec}")
+            publish_response("write commands disabled")
         else:
-            cmnd_queue.append(rec) 
+            cmnd_queue.append(rec)
     else:
         # Ausgabe anderer eingehenden MQTT-Nachrichten
         logger.warning(f"MQTT recd: Topic = {msg.topic}, Payload = {msg.payload}")
@@ -259,6 +264,20 @@ def handle_set_topic(topic, payload):
         if datapoint_info['bbfilter']:
             logger.warning(f"/set not possible with bb-filter datapoint '{dpname}'")
             return
+
+        # haus-fixes: optionaler Wertebereich je Datenpunkt (settings.write_limits = {'name': (min, max)})
+        limits = (settings.write_limits or {}).get(dpname)
+        if limits is not None:
+            try:
+                fval = float(value_str)
+            except ValueError:
+                logger.warning(f"/set '{dpname}': value '{value_str}' not numeric, rejected (write_limits)")
+                return
+            lo, hi = limits
+            if (lo is not None and fval < lo) or (hi is not None and fval > hi):
+                logger.warning(f"/set '{dpname}': value {fval} outside {limits}, rejected")
+                publish_response(f"/set {dpname}={value_str} rejected: outside {limits}")
+                return
 
         # datapoint_info: (Name, DpAddr, Len, Scale/Type, Signed) or with PollCycle
         addr = datapoint_info['addr']

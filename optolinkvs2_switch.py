@@ -122,15 +122,21 @@ def do_poll_item(poll_data, ser:serial.serial_for_url, item_index:int=None) -> i
                                 # publish to MQTT broker
                                 mod_mqtt.publish_read(next_item[0], next_item[1], next_val)
 
-                            poll_pointer = list_index
+                            if item_index is None:   # haus-fixes: forced readback darf den Poll-Durchlauf nicht verschieben
+                                poll_pointer = list_index
                         else:
                             break
         else:
             logger.error(f"OL Error do_poll_item {poll_pointer}, Addr {item[1]:04X}, RetCode {retcode}, Data {val}")
         return retcode
-    except Exception as e:
+    except (serial.SerialException, OSError) as e:
+        # Schnittstellenfehler -> Re-Start wie bisher
         logger.error(f"Error do_poll_item {poll_pointer}, {item}: {e}")
         raise
+    except Exception as e:
+        # haus-fixes: Auswertefehler eines einzelnen Items (Format, Laenge, ...) nur loggen und Item ueberspringen
+        logger.error(f"Error evaluating poll item {poll_pointer}, {item}: {e} - skipped")
+        return 0xFB
 
 
 # poll timer +++++++++++++++
@@ -195,7 +201,7 @@ def vicon_thread_func(serViCon, serViDev):
 def tcp_connection_loop():
     global tcp_server
     while(not progr_exit_flag):
-        tcp_server = c_tcpserver.TcpServer("0.0.0.0", settings.tcpip_port, settings.tcp_verbose)
+        tcp_server = c_tcpserver.TcpServer(settings.tcpip_host, settings.tcpip_port, settings.tcp_verbose)   # haus-fixes: Host einstellbar
         tcp_server.command_callback = do_special_command        # type: ignore
         tcp_server.run()
         tcp_server = None
@@ -748,9 +754,14 @@ def main():
                             if(msg):
                                 #print(f"recd tcp msg: {msg}")  #temp
                                 try:
-                                    retcode, _, _, resp = requests_util.response_to_request(msg, serOptolink)
-                                    #print(f"retcode {retcode}, try to send tcp: {resp}")  #temp
-                                    tcp_server.send(resp)
+                                    if (not settings.cmnd_write_allowed) and requests_util.is_write_command(msg):
+                                        # haus-fixes: Schreibbefehle per TCP gesperrt
+                                        logger.warning(f"TCP write command rejected (cmnd_write_allowed=False): {msg}")
+                                        tcp_server.send("write commands disabled")
+                                    else:
+                                        retcode, _, _, resp = requests_util.response_to_request(msg, serOptolink)
+                                        #print(f"retcode {retcode}, try to send tcp: {resp}")  #temp
+                                        tcp_server.send(resp)
                                 except Exception as e:
                                     logger.warning(f"Error handling TCP request {msg}: {e}")
                                 did_secodary_request = True

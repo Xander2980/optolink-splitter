@@ -60,10 +60,15 @@ class SettingsAdapter:
         self.mqtt_respond = "Vito/resp"         # MQTT topic for responses (default: "Vito/resp", set None to disable)
         self.mqtt_fstr = "{dpname}"             # Format string for MQTT messages (default: "{dpname}", alternative e.g.: "{dpaddr:04X}_{dpname}")
         self.mqtt_retain = False                # Publish retained messages. Last message per topic is stored on broker and sent to new/reconnecting subscribers. (default: False)
-        self.mqtt_no_redundant = False          # if True, no previously published unchanged messages 
+        self.mqtt_no_redundant = False          # if True, no previously published unchanged messages
+
+        # Write protection (haus-fixes) +++
+        self.cmnd_write_allowed = True          # False: MQTT/TCP commands write/writeraw/raw/request/fullraw are rejected (only reads allowed; /set stays possible)
+        self.write_limits = {}                  # optional per datapoint name: {'neigung_hk1': (0.2, 3.5), ...} – /set values outside are rejected
 
         # TCP/IP ++++++++++++++++++++++++++
         self.tcpip_port =  65234                # TCP/IP port for communication (default: 65234, used by Viessdata; set None to disable TCP/IP)
+        self.tcpip_host = "0.0.0.0"             # interface to bind, e.g. "127.0.0.1" for local only (haus-fixes)
         self.tcp_verbose = False                # TCP verbose logging if True
 
         # Optolink Communication Timing ++++
@@ -146,7 +151,8 @@ class SettingsAdapter:
         self.restart_delay = getattr(self._settings_obj, 'restart_delay', self.restart_delay)
         self.max_vicon_tries = getattr(self._settings_obj, 'max_vicon_tries', self.max_vicon_tries)
         self.max_comm_errors = getattr(self._settings_obj, 'max_comm_errors', self.max_comm_errors)               
-        self.retry_counters_reset = getattr(self._settings_obj, 'retry_counters_reset', self.retry_counters_reset)               
+        self.retry_counters_reset = getattr(self._settings_obj, 'retry_counters_reset', self.retry_counters_reset)
+        self.readback_delay_set = getattr(self._settings_obj, 'readback_delay_set', self.readback_delay_set)   # haus-fixes: wurde nie eingelesen
 
         # Serial Ports +++++++++++++++++++
         self.port_optolink = getattr(self._settings_obj, 'port_optolink', self.port_optolink)
@@ -173,8 +179,13 @@ class SettingsAdapter:
         self.mqtt_retain = getattr(self._settings_obj, 'mqtt_retain', self.mqtt_retain)
         self.mqtt_no_redundant = getattr(self._settings_obj, 'mqtt_no_redundant', self.mqtt_no_redundant)
 
+        # Write protection (haus-fixes) +++
+        self.cmnd_write_allowed = getattr(self._settings_obj, 'cmnd_write_allowed', self.cmnd_write_allowed)
+        self.write_limits = getattr(self._settings_obj, 'write_limits', self.write_limits)
+
         # TCP/IP ++++++++++++++++++++++++++
         self.tcpip_port = getattr(self._settings_obj, 'tcpip_port', self.tcpip_port)
+        self.tcpip_host = getattr(self._settings_obj, 'tcpip_host', self.tcpip_host)
         self.tcp_verbose = getattr(self._settings_obj, 'tcp_verbose', self.tcp_verbose)
 
         # Optolink Communication Timing ++++

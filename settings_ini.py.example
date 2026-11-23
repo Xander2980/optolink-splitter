@@ -41,6 +41,7 @@ mqtt_no_redundant = False       # if True, no previously published unchanged mes
 
 # TCP/IP ++++++++++++++++++++++++++
 tcpip_port = 65234              # TCP/IP port for communication (default: 65234, used by Viessdata; set None to disable TCP/IP)
+tcpip_host = "0.0.0.0"          # interface for TCP/IP, e.g. "127.0.0.1" for local only (haus-fixes)
 
 # Optolink Communication Timing ++++
 fullraw_eot_time = 0.05         # Timeout (seconds) to determine end of telegram (default: 0.05)
@@ -74,6 +75,8 @@ max_vicon_tries = 3             # limit for vicon tries. if exceeded, continuing
 max_comm_errors = 10            # optolink comm error threshold to init restart
 retry_counters_reset = 30       # minutes of sucessful operation to reset the retry counters 
 readback_delay_set = 1          # seconds delay between wirte via /set and reading back 
+cmnd_write_allowed = True       # False: write/writeraw/raw/request/fullraw via MQTT cmnd topic and TCP rejected; /set stays possible (haus-fixes)
+write_limits = {}               # optional /set range per datapoint, e.g. {"neigung_hk1": (0.2, 3.5), "raumsoll_normal_hk1": (10, 25)} (haus-fixes)
 
 
 
