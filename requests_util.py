@@ -133,6 +133,14 @@ def perform_bytebit_filter_and_evaluate(data, parts):
     return val
 
 
+def is_write_command(request:str) -> bool:
+    """haus-fixes: True fuer Befehle, die auf den Bus schreiben koennen (fullraw, raw, write, writeraw, request)"""
+    parts = str(request).replace(' ', '').split(';')
+    if len(parts) == 1:
+        return bool(parts[0])   # fullraw hex
+    return parts[0].lower() in ('raw', 'write', 'w', 'writeraw', 'wraw', 'request', 'req')
+
+
 def get_retstr(retcode, addr, val) -> str:
     prefix = '' #'0x' if('x' in settings.retcode_format.lower()) else '' 
     sretcode = prefix + format(retcode, settings.retcode_format)

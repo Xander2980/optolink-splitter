@@ -96,7 +96,13 @@ def read_datapoint_ext(addr:int, rdlen:int, ser:serial.Serial) -> tuple[int, int
     #print("R tx", utils.bbbstr(outbuff))
 
     # return retcode, addr, data
-    return receive_telegr(True, False, ser)
+    retcode, raddr, data = receive_telegr(True, False, ser)
+    # haus-fixes: Antwort muss zur Anfrage passen (verspaetete Antworten nicht falsch zuordnen) – upstream #258
+    if (retcode == 0x01) and ((raddr != addr) or (len(data) != rdlen)):
+        logger.error(f"VS2 response mismatch: requested {addr:04X}/{rdlen}, got {raddr:04X}/{len(data)}")
+        utils.comm_error(True)
+        return 0xFC, raddr, data
+    return retcode, raddr, data
 
 
 def write_datapoint(addr:int, data:bytes, ser:serial.Serial) -> bool:
@@ -122,7 +128,13 @@ def write_datapoint_ext(addr:int, data:bytes, ser:serial.Serial) -> tuple[int, i
     #print("W tx", utils.bbbstr(outbuff))
 
     # return retcode, addr, data
-    return receive_telegr(True, False, ser)
+    retcode, raddr, rdata = receive_telegr(True, False, ser)
+    # haus-fixes: Write-Antwort muss zur angefragten Adresse gehoeren – upstream #258
+    if (retcode == 0x01) and (raddr != addr):
+        logger.error(f"VS2 write response mismatch: requested {addr:04X}, got {raddr:04X}")
+        utils.comm_error(True)
+        return 0xFC, raddr, rdata
+    return retcode, raddr, rdata
 
 
 def do_request(ser:serial.Serial, fctcode:int, addr:int, rlen:int, data:bytes=b'', protid=0x00) -> tuple[int, int, bytearray]:
@@ -281,7 +293,7 @@ def receive_telegr(resptelegr:bool, raw:bool, ser:serial.Serial, ser2:serial.Ser
                     # receive complete
                     if(settings.show_opto_rx):
                         print("rx", utils.bbbstr(inbuff))
-                    inbuff = inbuff[:pllen+4]  # make sure no tailing trash 
+                    inbuff = inbuff[:pllen+3]  # STX + Len + Payload + CRC, no tailing trash (haus-fixes: war pllen+4 – upstream #259)
                     msgid = inbuff[2]
                     msqn = (inbuff[3] & 0xE0) >> 5
                     fctcd = inbuff[3] & 0x1F
