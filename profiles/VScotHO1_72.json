@@ -3,7 +3,7 @@
   "device_id": "20cb",
   "version_min": 328,
   "version_max": 345,
-  "source": "https://github.com/Xander2980/Haus-Roenkhausen/blob/fbcf97592b6c3fd123dd67b847844b2a6f2053f5/Heizung/Optolink/vitosoft_VScotHO1_72.tsv",
+  "source": "profiles/vitosoft_VScotHO1_72.tsv",
   "roles": {
     "burner": {
       "name": "flammenstatus",
