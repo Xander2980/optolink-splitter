@@ -21,6 +21,7 @@ class AdvancedConfig:
     web_host: str = "127.0.0.1"
     web_port: int = 8080
     web_password_env: str = "OPTOLINK_WEB_PASSWORD"
+    web_require_password: bool = True
     telemetry_interval: float = 10
     history_points: int = 720
     poll_overrides: dict = field(default_factory=dict)
@@ -50,7 +51,7 @@ class AdvancedConfig:
         except TypeError as exc:
             raise ValueError("Unknown advanced configuration key") from exc
         for name in ("enabled", "web_enabled", "read_only", "verified_writes",
-                     "detect_device", "require_profile_for_writes", "mqtt_discovery", "auto_catalog_profile"):
+                     "detect_device", "require_profile_for_writes", "web_require_password", "mqtt_discovery", "auto_catalog_profile"):
             if type(getattr(obj, name)) is not bool:
                 raise ValueError(name + " must be boolean")
         if type(obj.web_port) is not int or not 1 <= obj.web_port <= 65535:

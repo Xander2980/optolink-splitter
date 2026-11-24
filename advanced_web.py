@@ -140,8 +140,10 @@ def start_web(config, store):
         local = ipaddress.ip_address(config.web_host).is_loopback
     except ValueError:
         local = False
-    if not local and len(password) < 12:
+    if not local and config.web_require_password and len(password) < 12:
         raise ValueError("Non-loopback dashboard requires a password of at least 12 characters")
+    if not local and not password:
+        LOG.warning("Dashboard reachable on %s:%s without password (web_require_password=False)", config.web_host, config.web_port)
     server = LimitedServer((config.web_host, config.web_port), make_handler(store, password))
     thread = threading.Thread(target=server.serve_forever, name="optolink-web", daemon=True)
     thread.start()

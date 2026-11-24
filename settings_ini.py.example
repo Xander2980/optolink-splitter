@@ -110,6 +110,7 @@ advanced = {
     "web_host": "127.0.0.1",
     "web_port": 8080,
     # "web_host": "0.0.0.0",  # requires OPTOLINK_WEB_PASSWORD >= 12 chars; trusted LAN only
+    "web_require_password": True,  # False: LAN access without password (read-only dashboard, trusted LAN only)
     "telemetry_interval": 10,
     "history_points": 720,
     "poll_overrides": {},  # exact poll-list names: {"name": {"seconds": 5, "priority": 8}}

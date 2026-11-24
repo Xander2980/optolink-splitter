@@ -177,6 +177,20 @@ class WebTests(unittest.TestCase):
         finally:
             stop_web((server,thread))
 
+    def test_public_bind_without_password_allowed_when_opted_out(self):
+        c=AdvancedConfig.parse({"web_host":"0.0.0.0","web_require_password":False})
+        c.web_port=0
+        with patch.object(c,"web_password",return_value=""):
+            web=start_web(c,SnapshotStore())
+        try:
+            port=web[0].server_address[1]
+            with urlopen("http://127.0.0.1:%d/api/status"%port,timeout=2) as r:
+                self.assertEqual(r.status,200)
+        finally:
+            stop_web(web)
+        with self.assertRaises(ValueError):
+            AdvancedConfig.parse({"web_require_password":"no"})
+
     def test_public_bind_without_password_is_rejected(self):
         c=AdvancedConfig.parse({"web_host":"0.0.0.0"})
         with patch.object(c,"web_password",return_value=""), self.assertRaises(ValueError):
