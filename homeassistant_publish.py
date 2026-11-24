@@ -28,7 +28,7 @@ import time
 import ssl
 import re
 from copy import deepcopy
-from c_settings_adapter import settings
+from c_settings_adapter import settings, parse_broker
 
 from homeassistant_adapter import poll_items
 from homeassistant_adapter import ha_device
@@ -40,8 +40,7 @@ def connect_mqtt(retries=3, delay=5):
     )
 
     try:
-        mqtt_credentials = settings.mqtt_broker.split(":")
-        MQTT_BROKER, MQTT_PORT = mqtt_credentials[0], int(mqtt_credentials[1])
+        MQTT_BROKER, MQTT_PORT = parse_broker(settings.mqtt_broker)
 
         mqtt_user_pass = settings.mqtt_user
         if mqtt_user_pass and str(mqtt_user_pass).lower() != "none":
@@ -343,6 +342,20 @@ def publish_ha_discovery():
                     has_state_topics = any(k.endswith("_state_topic") for k in discovery_config.keys())
                     if "state_topic" not in discovery_config and not has_state_topics:
                         discovery_config["state_topic"] = f"{mqtt_base}/{name_id}"
+
+                # Add datapoint freshness to single-state entities, retaining the
+                # original combined LWT. Custom or multi-state entities keep their
+                # explicit availability configuration.
+                dp_name = item[1] if isinstance(item, (tuple, list)) else item.get("name")
+                if (dp_name in poll_map and domain != "button"
+                        and "availability" not in discovery_config
+                        and discovery_config.get("availability_topic") == f"{mqtt_base}/LWT"):
+                    discovery_config.pop("availability_topic")
+                    discovery_config["availability"] = [
+                        {"topic": f"{mqtt_base}/LWT"},
+                        {"topic": f"{mqtt_base}/quality/{dp_name}"},
+                    ]
+                    discovery_config["availability_mode"] = "all"
 
                 topic_id = f"{name_id}"
                 topic = f"{ha_prefix}/{domain}/{node_id}/{topic_id}/config"

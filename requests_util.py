@@ -29,6 +29,7 @@ import c_w1value
 w1values: dict[int, c_w1value.W1Value] = {}
 
 def init_w1_values_check():
+    w1values.clear()
     for addr,info in settings.w1sensors.items():  # Addr: ('<w1_folder/sn>', '<slave_type>')
         if info[1].lower() == 'ds18b20':
             # scalar value, check max_change
@@ -229,7 +230,10 @@ def response_to_request(request, serViDev) -> tuple[int, bytearray, Any, str]:  
             # write +++++++++++++++++++
             #raise Exception("write noch nicht fertig") #TODO scaling und so
             ival = utils.get_int(parts[3])
-            bval = ival.to_bytes(int(parts[2]), 'little', signed=(ival < 0))
+            length = int(parts[2])
+            if not 1 <= length <= (255 if settings.vs1protocol else 250):
+                raise ValueError("Invalid write length")
+            bval = ival.to_bytes(length, 'little', signed=(ival < 0))
             retcode, addr, data = vs12_adapter.write_datapoint_ext(utils.get_int(parts[1]), bval, serViDev)
             if(retcode == 1): 
                 val = int.from_bytes(bval, 'little', signed=(ival < 0))

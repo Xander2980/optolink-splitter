@@ -17,9 +17,11 @@
 import time
 from queue import Queue, Empty, Full
 import math
+import json
+from typing import Optional, Any
 import paho.mqtt.client as paho
 
-from c_settings_adapter import settings
+from c_settings_adapter import settings, parse_broker
 from logger_util import logger
 from c_polllist import poll_list
 import utils
@@ -32,6 +34,7 @@ verbose = False
 mqtt_client = None
 cmnd_queue = Queue(maxsize=128)  # (command/topic, optional /set payload, received time)
 optolink_ready = False
+connection_generation = 0
 
 recent_posts = {}
 _sentinel = object()  # eindeutiger Wert fuer "nicht vorhanden"
@@ -45,9 +48,12 @@ def on_connect(client, userdata, flags, reason_code, properties):
     if getattr(reason_code, 'is_failure', False):
         logger.error(f"MQTT connect refused: {reason_code}")
         return
+    global connection_generation
+    connection_generation += 1
+    utils.work_event.set()
     reset_recent_list()
     # publish LWT online
-    client.publish(settings.mqtt_topic + "/LWT", "online" if optolink_ready else "offline", qos=1, retain=True)
+    publish_connection_status(client)
     # Subscribe to /set topics for writable datapoints
     subscriptions = [
         (settings.mqtt_topic + "/+/set", 0),
@@ -63,6 +69,7 @@ def on_disconnect(client, userdata, flags, reason_code, properties):
     if reason_code != 0:
         logger.warning('mqtt broker disconnected. reason_code = ' + str(reason_code))
     # Broker publishes the configured Last Will on unexpected disconnect.
+    utils.work_event.set()
 
 def on_message(client, userdata, msg):
     logger.debug(f"MQTT recd: {msg.topic}, {msg.payload}")
@@ -81,7 +88,11 @@ def on_message(client, userdata, msg):
     if topic.endswith('/set') and settings.mqtt_topic and topic.startswith(settings.mqtt_topic + '/'):
         enqueue_request(topic, msg.payload)
     elif topic == settings.mqtt_listen:
-        rec = utils.bstr2str(msg.payload)
+        try:
+            rec = utils.bstr2str(msg.payload)
+        except UnicodeError:
+            logger.warning("Invalid UTF-8 MQTT command")
+            return
         rec = rec.replace(' ','').replace('\0','').replace('\n','').replace('\r','').replace('"','').replace("'","")
         enqueue_request(rec)
     else:
@@ -89,13 +100,11 @@ def on_message(client, userdata, msg):
         logger.warning(f"MQTT recd: Topic = {msg.topic}, Payload = {msg.payload}")
 
 
-def on_subscribe(client, userdata, mid, reason_code_list, properties):
-    # Since we subscribed only for a single channel, reason_code_list contains
-    # a single entry
-    if reason_code_list[0].is_failure:
-        logger.error(f"MQTT Broker rejected you subscription: {reason_code_list[0]}")
-    else:
-        logger.info(f"MQTT Broker granted the following QoS: {reason_code_list[0].value} on {settings.mqtt_broker}")
+def on_subscribe(client, userdata, mid, reason_code_list, properties=None):
+    for reason in reason_code_list:
+        if getattr(reason, "is_failure", False) or reason == 128:
+            logger.error(f"MQTT subscription rejected: {reason}")
+
 
 def on_log(client, userdata, level, buf):
     logger.info(f"MQTT [{level}]: {buf}")
@@ -106,10 +115,11 @@ def connect_mqtt():
     #try:  # exception handled in calling proc
     # Verbindung zu MQTT Broker herstellen ++++++++++++++
     clientid = "olswitch_" + settings.mqtt_topic.replace("/", "").replace(" ", "")
-    try:
-        mqtt_client = paho.Client(paho.CallbackAPIVersion.VERSION2, clientid) # + '_' + str(int(time.time()*1000)))  # Unique mqtt id using timestamp
-    except:
-        mqtt_client = paho.Client(client_id=clientid) # + '_' + str(int(time.time()*1000)))  # Unique mqtt id using timestamp
+    # paho 1.x and 2.x use different callback signatures.
+    if hasattr(paho, "CallbackAPIVersion"):
+        mqtt_client = paho.Client(paho.CallbackAPIVersion.VERSION2, clientid)
+    else:
+        mqtt_client = paho.Client(client_id=clientid)
 
     # MQTT Username/Password (mqtt_user = "<user>:<pwd>" or None for anonymous)
     creds = settings.mqtt_user
@@ -121,8 +131,17 @@ def connect_mqtt():
                 mqtt_client.username_pw_set(user, password=(pwd if pwd != "" else None))
             else:
                 mqtt_client.username_pw_set(creds, password=None)
-    mqtt_client.on_connect = on_connect
-    mqtt_client.on_disconnect = on_disconnect
+    if hasattr(paho, "CallbackAPIVersion"):
+        mqtt_client.on_connect = on_connect
+        mqtt_client.on_disconnect = on_disconnect
+    else:
+        def legacy_connect(client, userdata, flags, rc):
+            if rc == 0:
+                on_connect(client, userdata, flags, rc, None)
+            else:
+                logger.error(f"MQTT connect refused: {rc}")
+        mqtt_client.on_connect = legacy_connect
+        mqtt_client.on_disconnect = lambda client, userdata, rc: on_disconnect(client, userdata, None, rc, None)
     mqtt_client.on_message = on_message
     mqtt_client.will_set(settings.mqtt_topic + "/LWT", "offline", qos=1, retain=True)
     if(settings.mqtt_listen != None):
@@ -149,9 +168,11 @@ def connect_mqtt():
         )
         # IP / hostname mismatch and for "skip verify" mode
         mqtt_client.tls_insecure_set(skip)
-    mlst = settings.mqtt_broker.split(':')      # type: ignore
-    mqtt_client.connect(mlst[0], int(mlst[1]))
+    host, port = parse_broker(settings.mqtt_broker)
+    mqtt_client.max_queued_messages_set(256)
     mqtt_client.reconnect_delay_set(min_delay=1, max_delay=30)
+    # Broker outages must not stop local serial/TCP operations.
+    mqtt_client.connect_async(host, port)
     mqtt_client.loop_start()
     # preparations
     if(settings.mqtt_fstr is None):
@@ -160,9 +181,10 @@ def connect_mqtt():
     #    raise Exception("Error connecting MQTT: " + str(e))
 
 
-def enqueue_request(command, payload=None):
+def enqueue_request(command: str, payload: Optional[bytes] = None) -> bool:
     try:
         cmnd_queue.put_nowait((command, payload, time.monotonic()))
+        utils.work_event.set()
         return True
     except Full:
         logger.warning("MQTT command queue full")
@@ -170,7 +192,7 @@ def enqueue_request(command, payload=None):
         return False
 
 
-def get_mqtt_request():
+def get_mqtt_request() -> tuple[str, Optional[str]]:
     try:
         command, payload, received = cmnd_queue.get_nowait()
     except Empty:
@@ -190,17 +212,35 @@ def get_mqtt_request():
     return command, None
 
 
-def set_optolink_ready(ready):
+def publish_connection_status(client) -> None:
+    # LWT remains the legacy combined availability. The additional protocol
+    # status distinguishes a live broker session from a disconnected heater.
+    client.publish(settings.mqtt_topic + "/status/optolink",
+                   "online" if optolink_ready else "offline", qos=1, retain=True)
+    client.publish(settings.mqtt_topic + "/LWT",
+                   "online" if optolink_ready else "offline", qos=1, retain=True)
+
+
+def set_optolink_ready(ready: bool) -> None:
     global optolink_ready
     optolink_ready = bool(ready)
     client = mqtt_client
     if client is not None and client.is_connected():
-        client.publish(settings.mqtt_topic + "/LWT",
-                       "online" if optolink_ready else "offline",
-                       qos=1, retain=True)
+        publish_connection_status(client)
 
 
-def clear_pending_requests():
+def publish_quality(name: str, measurement) -> bool:
+    client = mqtt_client
+    if client is None or not client.is_connected():
+        return False
+    base = settings.mqtt_topic + "/quality/" + name
+    a = client.publish(base, "online" if measurement.valid else "offline", qos=1, retain=True)
+    b = client.publish(base + "/last_success",
+                       json.dumps(measurement.observed_at), qos=1, retain=True)
+    return a.rc == paho.MQTT_ERR_SUCCESS and b.rc == paho.MQTT_ERR_SUCCESS
+
+
+def clear_pending_requests() -> None:
     while True:
         try:
             cmnd_queue.get_nowait()
@@ -209,11 +249,11 @@ def clear_pending_requests():
     lst_force_refresh.clear()
 
 
-def publish_read(name, addr, value):
+def publish_read(name: str, addr: int, value: Any, force: bool = False):
     if mqtt_client:
         publishStr = settings.mqtt_fstr.format(dpaddr = addr, dpname = name)
         # send
-        ret = publish_smart(settings.mqtt_topic + "/" + publishStr, value, retain=settings.mqtt_retain)    
+        ret = publish_smart(settings.mqtt_topic + "/" + publishStr, value, retain=settings.mqtt_retain, force=force)    
         if(verbose): print(ret)
 
 
@@ -224,14 +264,14 @@ def publish_response(resp:str):
         if(verbose): print(ret)
 
 
-def publish_smart(topic, value, qos=0, retain=False):
+def publish_smart(topic: str, value: Any, qos: int = 0, retain: bool = False, force: bool = False):
     client = mqtt_client
     if client is None or not client.is_connected():
         return
     # Keep the cache object local so a reconnect cannot repopulate a new cache
     # with an entry from an earlier MQTT session.
     cache = recent_posts
-    if settings.mqtt_no_redundant and cache.get(topic, _sentinel) == value:
+    if not force and settings.mqtt_no_redundant and cache.get(topic, _sentinel) == value:
         return
     result = client.publish(topic, value, qos=qos, retain=retain)
     if result.rc == paho.MQTT_ERR_SUCCESS and settings.mqtt_no_redundant:
@@ -254,6 +294,7 @@ def exit_mqtt():
         return
     try:
         if client.is_connected():
+            publish_connection_status(client)
             info = client.publish(settings.mqtt_topic + "/LWT", "offline", qos=1, retain=True)
             try:
                 info.wait_for_publish(timeout=2)
@@ -280,7 +321,7 @@ def exit_mqtt():
 lst_force_refresh = []
 
 
-def is_forced():
+def is_forced() -> Optional[int]:
     now = time.monotonic()
     for i, (deadline, name) in enumerate(lst_force_refresh):
         if deadline <= now:
@@ -292,7 +333,7 @@ def is_forced():
     return None
 
 
-def force_delayed(name, delay=1):
+def force_delayed(name: str, delay: float = 1) -> None:
     # Only the serial worker schedules and consumes readbacks.
     # Coalesce repeated writes to the same datapoint; no thread per write.
     lst_force_refresh[:] = [(due, dp) for due, dp in lst_force_refresh if dp != name]
@@ -302,7 +343,7 @@ def force_delayed(name, delay=1):
     lst_force_refresh.append((time.monotonic() + max(0, delay), name))
 
 
-def handle_set_topic(topic, payload):
+def handle_set_topic(topic: str, payload: bytes) -> Optional[tuple[str, str]]:
     """
     Handle /set topic messages for writable datapoints.
     Topic format: {mqtt_topic}/{dpname}/set
@@ -372,12 +413,12 @@ def handle_set_topic(topic, payload):
         logger.debug(f"Generated write command: {write_cmd}")
         return write_cmd, dpname
 
-    except: #Exception as e:
+    except (ValueError, TypeError, OverflowError, KeyError, IndexError):
         logger.exception(f"handle_set_topic {topic}, {payload}")
         #logger.error(f"Error handling /set topic '{topic}': {e}")
 
 
-def convert_value_to_bytes(value_str, length, scale_type, signed):  # tuple of bytes, bool <- writeraw if True
+def convert_value_to_bytes(value_str: str, length: int, scale_type: Any, signed: bool) -> tuple[Optional[bytes], bool]:  # tuple of bytes, bool <- writeraw if True
     """
     Convert human-readable value string to bytes for writing.
     Reverse operation of requests_util.get_value()
@@ -411,6 +452,8 @@ def convert_value_to_bytes(value_str, length, scale_type, signed):  # tuple of b
         if scale is not None:
             # Parse numeric value and reverse scaling
             float_val = float(value_str)
+            if not math.isfinite(float_val) or not math.isfinite(scale) or scale == 0:
+                return None, False
             int_val = int(round(float_val / scale))
             return int_val.to_bytes(length, byteorder='little', signed=signed), False
 
@@ -432,7 +475,7 @@ def convert_value_to_bytes(value_str, length, scale_type, signed):  # tuple of b
         int_val = utils.get_int(value_str)
         return int_val.to_bytes(length, byteorder='little', signed=signed), True
         
-    except: # Exception as e:
+    except (ValueError, TypeError, OverflowError, ZeroDivisionError):
         logger.exception(f"convert_value_to_bytes {value_str}, {scale_type}")
         #logger.error(f"Error converting value '{value_str}' with scale_type '{scale_type}': {e}")
         return None, False

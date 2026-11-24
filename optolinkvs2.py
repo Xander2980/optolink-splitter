@@ -236,7 +236,8 @@ def receive_telegr(resptelegr:bool, raw:bool, ser:serial.Serial, ser2:serial.Ser
                 inbuff += inbytes
                 alldata += inbytes
         except (serial.SerialException, OSError):
-            utils.comm_error(True)
+            if resptelegr:
+                utils.comm_error(True)
             return 0xAA, 0, retdata
 
         # ggf. gleich durchleiten 
@@ -257,14 +258,16 @@ def receive_telegr(resptelegr:bool, raw:bool, ser:serial.Serial, ser2:serial.Ser
                         retdata = alldata
                         if(mqtt_publ_callback):
                             mqtt_publ_callback(0x15, addr, retdata, msgid, msqn, fctcd, dlen)
-                        utils.comm_error(True)
+                        if resptelegr:
+                            utils.comm_error(True)
                         return 0x15, 0, retdata       # hier muesste ggf noch ein eventueller Rest des Telegrams abgewartet werden 
                     else:
                         logger.error(f"VS2 unknown first byte Error, {inbuff[0]:02X}")
                         retdata = alldata
                         if(mqtt_publ_callback):
                             mqtt_publ_callback(0x20, addr, retdata, msgid, msqn, fctcd, dlen)
-                        utils.comm_error(True)
+                        if resptelegr:
+                            utils.comm_error(True)
                         return 0x20, 0, retdata
                     # erstes Byte abtrennen
                     inbuff = inbuff[1:]
@@ -280,7 +283,8 @@ def receive_telegr(resptelegr:bool, raw:bool, ser:serial.Serial, ser2:serial.Ser
                     if(mqtt_publ_callback):
                         mqtt_publ_callback(0x41, addr, retdata, msgid, msqn, fctcd, dlen)
                     #if(raw): retdata = alldata
-                    utils.comm_error(True)
+                    if resptelegr:
+                        utils.comm_error(True)
                     return 0x41, 0, retdata  # hier muesste ggf noch ein eventueller Rest des Telegrams abgewartet werden
                 state = 2
 
@@ -294,7 +298,8 @@ def receive_telegr(resptelegr:bool, raw:bool, ser:serial.Serial, ser2:serial.Ser
                     if(mqtt_publ_callback):
                         mqtt_publ_callback(0xFD, addr, retdata, msgid, msqn, fctcd, dlen)
                     #if(raw): retdata = alldata
-                    utils.comm_error(True)
+                    if resptelegr:
+                        utils.comm_error(True)
                     return 0xFD, 0, retdata  # alldata?!
                 if(len(inbuff) >= pllen + 3):  # STX + Len + Payload + CRC
                     # receive complete
@@ -313,14 +318,16 @@ def receive_telegr(resptelegr:bool, raw:bool, ser:serial.Serial, ser2:serial.Ser
                         if(mqtt_publ_callback):
                             mqtt_publ_callback(0xFE, addr, retdata, msgid, msqn, fctcd, dlen)
                         if(raw): retdata = alldata
-                        utils.comm_error(True)
+                        if resptelegr:
+                            utils.comm_error(True)
                         return 0xFE, addr, retdata
                     if(inbuff[2] & 0x0F == 0x03):
                         #logger.info(f"Error Message {utils.bbbstr(retdata)} on 0x{addr:04x}")
                         if(mqtt_publ_callback):
                             mqtt_publ_callback(0x03, addr, retdata, msgid, msqn, fctcd, dlen)
                         if(raw): retdata = alldata
-                        utils.comm_error(False)
+                        if resptelegr:
+                            utils.comm_error(False)
                         return 0x03, addr, retdata
                     if expected_function is not None and (
                         (msgid & 0x0F) != 1 or fctcd != expected_function
@@ -328,13 +335,15 @@ def receive_telegr(resptelegr:bool, raw:bool, ser:serial.Serial, ser2:serial.Ser
                         or (expected_length is not None and (dlen != expected_length or len(retdata) != expected_length))
                     ):
                         logger.error("VS2 response does not match request")
-                        utils.comm_error(True)
+                        if resptelegr:
+                            utils.comm_error(True)
                         return 0xFC, addr, retdata
                     #success
                     if(mqtt_publ_callback):
                         mqtt_publ_callback(0x01, addr, retdata, msgid, msqn, fctcd, dlen)
                     if(raw): retdata = alldata
-                    utils.comm_error(False)
+                    if resptelegr:
+                        utils.comm_error(False)
                     return 0x01, addr, retdata
     # timout if get to here
     if(settings.show_opto_rx):
@@ -342,7 +351,8 @@ def receive_telegr(resptelegr:bool, raw:bool, ser:serial.Serial, ser2:serial.Ser
     if(mqtt_publ_callback):
         mqtt_publ_callback(0xFF, addr, retdata, msgid, msqn, fctcd, dlen)
     if(raw): retdata = alldata
-    utils.comm_error(True)
+    if resptelegr:
+        utils.comm_error(True)
     return 0xFF, addr, retdata
 
 

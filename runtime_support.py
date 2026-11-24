@@ -42,3 +42,49 @@ class Measurement:
         if self.valid and max_age is not None and self.updated is not None and now - self.updated >= max_age:
             return self.invalidate()
         return False
+
+
+class MeasurementTracker:
+    def __init__(self):
+        self.values: dict[str, Measurement] = {}
+        self.dirty: set[str] = set()
+        self.last_report: dict[str, float] = {}
+
+    def configure(self, names) -> None:
+        # Retain old names as invalid until the next flush, so removed sensors
+        # do not remain online in the broker.
+        for name in set(self.values) | set(names):
+            self.values.setdefault(name, Measurement()).invalidate()
+            self.dirty.add(name)
+        self.last_report.clear()
+
+    def observe(self, name: str, value, now: float, wall_time: float) -> None:
+        entry = self.values.setdefault(name, Measurement())
+        if not valid_measurement(value):
+            self.invalidate(name)
+            return
+        was_valid = entry.valid
+        entry.success(now, wall_time)
+        if not was_valid or now - self.last_report.get(name, -1e12) >= 30:
+            self.dirty.add(name)
+
+    def invalidate(self, name: str) -> None:
+        entry = self.values.setdefault(name, Measurement())
+        if entry.invalidate() or name not in self.last_report:
+            self.dirty.add(name)
+
+    def invalidate_all(self) -> None:
+        for name in self.values:
+            self.invalidate(name)
+
+    def expire(self, now: float, deadlines: dict[str, Optional[float]]) -> None:
+        for name, entry in self.values.items():
+            if entry.expire(now, deadlines.get(name)):
+                self.dirty.add(name)
+
+    def republish(self) -> None:
+        self.dirty.update(self.values)
+
+    def mark_sent(self, name: str, now: float) -> None:
+        self.dirty.discard(name)
+        self.last_report[name] = now

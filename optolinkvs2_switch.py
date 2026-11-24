@@ -22,6 +22,9 @@ import threading
 import importlib
 import json
 import signal
+from dataclasses import dataclass, field
+from typing import Any, Optional
+from runtime_support import MeasurementTracker, reconnect_delay, freshness_deadline, valid_measurement
 
 from c_settings_adapter import settings  # to be done first to get logger settings
 from logger_util import logger
@@ -36,30 +39,56 @@ import utils
 import wo1c_energy
 import c_LoggingSerial
 
-# exit flag e.g. to stop endless loops
-progr_exit_flag = False
-
-# ether objects
-mod_mqtt = None
-tcp_server = None
-
-splitter_started = time.time()
-last_vs1_comm = 0
-
-force_poll_flag = False
-reload_poll_flag = False
-
-num_vicon_tries = 0
-num_restarts = 0
+@dataclass
+class RuntimeState:
+    mqtt: Any = None
+    tcp: Any = None
+    splitter_started: float = field(default_factory=time.time)
+    last_vs1_comm: float = 0.0
+    force_poll: bool = False
+    reload_poll: bool = False
+    num_vicon_tries: int = 0
+    num_restarts: int = 0
+    poll_pointer: int = 0
+    poll_cycle: int = 0
+    measurements: MeasurementTracker = field(default_factory=MeasurementTracker)
 
 
-# === polling =============================
-poll_pointer = 0
-poll_cycle = 0
+state = RuntimeState()
 
-def do_poll_item(poll_data, ser:serial.serial_for_url, item_index:int=None) -> int:  # retcode      # type: ignore
+
+def mqtt_connected() -> bool:
+    return bool(state.mqtt is not None and state.mqtt.mqtt_client is not None
+                and state.mqtt.mqtt_client.is_connected())
+
+
+def record_measurement(name: str, addr: int, value: Any) -> bool:
+    if not valid_measurement(value):
+        state.measurements.invalidate(name)
+        return False
+    was_valid = state.measurements.values.get(name)
+    force = was_valid is None or not was_valid.valid
+    state.measurements.observe(name, value, time.monotonic(), time.time())
+    if state.mqtt is not None:
+        state.mqtt.publish_read(name, addr, value, force=force)
+    return True
+
+
+def quality_tick(now: float) -> None:
+    deadlines = {
+        item[1]: freshness_deadline(settings.poll_interval, poll_list.num_items,
+                                    poll_list.cycle_groups[item[0]], settings.poll_stale_after)
+        for item in poll_list.items
+    }
+    state.measurements.expire(now, deadlines)
+    if mqtt_connected():
+        for name in list(state.measurements.dirty)[:64]:
+            if state.mqtt.publish_quality(name, state.measurements.values[name]):
+                state.measurements.mark_sent(name, now)
+
+
+def do_poll_item(poll_data: list, ser: serial.Serial, item_index: Optional[int] = None) -> int:  # retcode      # type: ignore
     # set item_index to force poll
-    global poll_pointer
     val = "?"
     item = "?"
 
@@ -68,19 +97,19 @@ def do_poll_item(poll_data, ser:serial.serial_for_url, item_index:int=None) -> i
         # handle PollCycle option +++++++++++++++++++++++
         # loop though poll items until find one to be done this cycle
         while(True):
-            list_index = item_index if item_index is not None else poll_pointer
+            list_index = item_index if item_index is not None else state.poll_pointer
             item = poll_list.items[list_index]  # (PollCycleGroupKey, Name, DpAddr, Len, Scale/Type, Signed)
             item_cycle = poll_list.cycle_groups[item[0]]
 
-            if(item_index is None) and ((item_cycle < 0) or ((item_cycle > 0) and (poll_cycle % item_cycle != 0)) or ((item_cycle == 0) and (poll_cycle != 0))):
+            if(item_index is None) and ((item_cycle < 0) or ((item_cycle > 0) and (state.poll_cycle % item_cycle != 0)) or ((item_cycle == 0) and (state.poll_cycle != 0))):
                 # ---------------------------------------
                 # +++ do NOT poll this item this time +++
                 # ---------------------------------------
 
-                # leave poll_data[poll_pointer] unchanged
+                # leave poll_data[state.poll_pointer] unchanged
 
-                poll_pointer += 1
-                if(poll_pointer == poll_list.num_items):
+                state.poll_pointer += 1
+                if(state.poll_pointer == poll_list.num_items):
                     # no further item this cycle
                     return 0xAB
 
@@ -89,15 +118,19 @@ def do_poll_item(poll_data, ser:serial.serial_for_url, item_index:int=None) -> i
                 item = item[1:]
                 break
 
-        retcode, data, val, _ = requests_util.response_to_request(item, ser)
+        for attempt in range(settings.poll_read_retries + 1):
+            retcode, data, val, _ = requests_util.response_to_request(item, ser)
+            if retcode == 0xAA:
+                raise serial.SerialException("Optolink USB connection lost")
+            if retcode not in (0x15, 0x20, 0x41, 0xFC, 0xFD, 0xFE, 0xFF) or attempt == settings.poll_read_retries or utils.restart_event.is_set():
+                break
+            olbreath(retcode)
 
         if(retcode == 0x01):
-            # save val in buffer for csv
+            if not record_measurement(item[0], item[1], val):
+                poll_data[list_index] = None
+                return 0xFB
             poll_data[list_index] = val
-
-            # post to MQTT broker
-            if(mod_mqtt is not None): 
-                mod_mqtt.publish_read(item[0], item[1], val)
 
             # probably more bytebit values of the same datapoint?!
             if(len(item) > 3):
@@ -114,28 +147,26 @@ def do_poll_item(poll_data, ser:serial.serial_for_url, item_index:int=None) -> i
                         if((len(next_item) > 3) and (next_item[1] == item[1]) and (next_item[2] == item[2]) and (str(next_item[3]).lower()).startswith('b:')):
                             next_val = requests_util.perform_bytebit_filter_and_evaluate(data, next_item)
 
-                            # save val in buffer for csv
-                            poll_data[list_index] = next_val
-
-                            if(mod_mqtt is not None): 
-                                #if not ((next_item_cycle < 0) or ((next_item_cycle > 0) and (poll_cycle % next_item_cycle != 0)) or ((next_item_cycle == 0) and (poll_cycle != 0))):
-                                # publish to MQTT broker
-                                mod_mqtt.publish_read(next_item[0], next_item[1], next_val)
+                            poll_data[list_index] = next_val if record_measurement(next_item[0], next_item[1], next_val) else None
 
                             if item_index is None:   # haus-fixes: forced readback darf den Poll-Durchlauf nicht verschieben
-                                poll_pointer = list_index
+                                state.poll_pointer = list_index
                         else:
                             break
         else:
-            logger.error(f"OL Error do_poll_item {poll_pointer}, Addr {item[1]:04X}, RetCode {retcode}, Data {val}")
+            state.measurements.invalidate(item[0])
+            poll_data[list_index] = None
+            logger.error(f"OL Error do_poll_item {state.poll_pointer}, Addr {item[1]:04X}, RetCode {retcode}, Data {val}")
         return retcode
     except (serial.SerialException, OSError) as e:
         # Schnittstellenfehler -> Re-Start wie bisher
-        logger.error(f"Error do_poll_item {poll_pointer}, {item}: {e}")
+        logger.error(f"Error do_poll_item {state.poll_pointer}, {item}: {e}")
         raise
     except Exception as e:
         # haus-fixes: Auswertefehler eines einzelnen Items (Format, Laenge, ...) nur loggen und Item ueberspringen
-        logger.error(f"Error evaluating poll item {poll_pointer}, {item}: {e} - skipped")
+        if isinstance(item, tuple) and item:
+            state.measurements.invalidate(item[0])
+        logger.error(f"Error evaluating poll item {state.poll_pointer}, {item}: {e} - skipped")
         return 0xFB
 
 
@@ -145,11 +176,10 @@ def olbreath(retcode:int):
     """
     give vitotronic some time between comms to do other things
     """
-    global last_vs1_comm
     if(retcode <= 0x03):
         # success, err msg
         if(settings.vs1protocol):
-            last_vs1_comm = time.monotonic()
+            state.last_vs1_comm = time.monotonic()
             vs12_adapter.reset_vs1sync()
         time.sleep(settings.olbreath)
     elif(retcode in [0xFF, 0xAA, 0xAB]):
@@ -157,7 +187,7 @@ def olbreath(retcode:int):
         pass
     else:
         if(settings.vs1protocol):
-            last_vs1_comm = time.monotonic()
+            state.last_vs1_comm = time.monotonic()
             vs12_adapter.reset_vs1sync()
         # allow calming down
         time.sleep(2 * settings.olbreath)
@@ -186,7 +216,6 @@ def vicon_thread_func(serViCon, serViDev):
 
 # TCP loop +++++++++++++++++++++++++++++
 def tcp_connection_loop(stop_event):
-    global tcp_server
     while not stop_event.is_set():
         session = None
         try:
@@ -194,7 +223,7 @@ def tcp_connection_loop(stop_event):
                 settings.tcpip_host, settings.tcpip_port,
                 settings.tcp_verbose, settings.tcp_legacy_idle)
             session.command_callback = do_special_command
-            tcp_server = session
+            state.tcp = session
             if not stop_event.is_set():
                 session.run()
         except (OSError, ValueError):
@@ -203,13 +232,12 @@ def tcp_connection_loop(stop_event):
         finally:
             if session is not None:
                 session.stop()
-            tcp_server = None
+            state.tcp = None
         stop_event.wait(1)
 
 
 # utils +++++++++++++++++++++++++++++
 def do_special_command(cmnd:str, source:int=1) -> bool:  # source: 1:MQTT, 2:TCP, 0:no response
-    global force_poll_flag, reload_poll_flag
 
     try:
         resp =  f"{cmnd} failed"
@@ -219,20 +247,20 @@ def do_special_command(cmnd:str, source:int=1) -> bool:  # source: 1:MQTT, 2:TCP
         parts = cmnd.split(";")
         #print("do_special_command",cmnd)
         if parts[0] in ('reset', 'resetrecent'):
-            if(mod_mqtt is not None):
-                mod_mqtt.reset_recent_list()
+            if(state.mqtt is not None):
+                state.mqtt.reset_recent_list()
                 resp = f"recent list cleared"
         elif parts[0] in ('forcepoll',):
-            force_poll_flag = True
+            state.force_poll = True
             resp = f"{parts[0]} triggered"
         elif parts[0] in ('reloadpoll',):   
-            reload_poll_flag = True
+            state.reload_poll = True
             resp = f"{parts[0]} triggered"
         elif parts[0] in ('stats', 'getstats'):   
             resp = get_stats()
         elif parts[0] in ("exit", "resettcp"):
-            if tcp_server:
-                tcp_server.stop()
+            if state.tcp:
+                state.tcp.stop()
                 resp = f"{parts[0]} triggered" if source != 2 else ''
         elif parts[0] in ("flushcsv",):
             if settings.write_viessdata_csv:
@@ -240,13 +268,17 @@ def do_special_command(cmnd:str, source:int=1) -> bool:  # source: 1:MQTT, 2:TCP
                 resp = f"{parts[0]} triggered"
         elif parts[0] in ("reini", "reloadini"):
             # some changes (like ser ports) will not take effect...
-            settings.set_settings(reload=True)
-            resp = f"ini settings reloaded"
+            if not settings.set_settings(reload=True):
+                raise ValueError("Settings reload failed")
+            resp = "ini settings reloaded"
         elif parts[0] in ("setpollcycle", "setcycle"):
             if poll_list.set_pollcycle(parts[1], parts[2]):
                 resp = f"cycle_group {parts[1]} set to {parts[2]}"
         elif parts[0] in ("setpollinterval", "setinterval"):
-            settings.poll_interval = int(parts[1])
+            interval = int(parts[1])
+            if interval < -1:
+                raise ValueError("poll interval must be >= -1")
+            settings.poll_interval = interval
             resp = f"poll_interval set to {parts[1]}"
         else:
             return False
@@ -255,57 +287,44 @@ def do_special_command(cmnd:str, source:int=1) -> bool:  # source: 1:MQTT, 2:TCP
     # responde
     if(resp):
         if(source == 1):
-            if(mod_mqtt):
-                mod_mqtt.publish_response(resp)
+            if(state.mqtt):
+                state.mqtt.publish_response(resp)
         elif(source == 2):
-            if(tcp_server):
-                tcp_server.send(resp)
+            if(state.tcp):
+                state.tcp.send(resp)
     return True
 
 
 def publish_stats():
-    if(mod_mqtt is not None) and mod_mqtt.mqtt_client.is_connected():
+    if mqtt_connected():
         topic = settings.mqtt_topic + "/stats"
         msg = get_stats()
-        mod_mqtt.publish_smart(topic, msg)
+        state.mqtt.publish_smart(topic, msg)
 
 def get_stats() -> str:
     jdata = {"Splitter Version" : VERSION,
-            "Splitter started" : str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(splitter_started))),
+            "Splitter started" : str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(state.splitter_started))),
             "Settings Make" : str(utils.get_module_modified_datetime(settings._settings_obj)) if settings._settings_obj else "0", 
             "Poll List Make" : str(poll_list.module_date),
             "Poll List Items" : str(poll_list.num_items)}
     return json.dumps(jdata)
 
 
-def reset_retry_counters_in(delay_minutes=30):
-    # Achtung! blockiert Ctrl+C etc
-    global num_restarts, num_vicon_tries
-    
-    def reset_counters():
-        global num_restarts, num_vicon_tries
-        num_restarts = 0
-        num_vicon_tries = 0
-
-    timer = threading.Timer(delay_minutes * 60, reset_counters)
-    timer.start()
-
-
 def mqtt_publ_debug(msg:str):
-    if(mod_mqtt is not None) and mod_mqtt.mqtt_client.is_connected():
-        mod_mqtt.mqtt_client.publish(settings.mqtt_topic + "/debug", msg)  
+    if mqtt_connected():
+        state.mqtt.mqtt_client.publish(settings.mqtt_topic + "/debug", msg)  
 
 
 # MQTT publish callback VS2 +++++++++++++++++++++++++++++
 def mqtt_publ_viconn(retcd, addr, data, msgid, msqn, fctcd, dlen):
-    if(mod_mqtt is not None) and mod_mqtt.mqtt_client.is_connected():
+    if mqtt_connected():
         if addr:
             topic = settings.mqtt_topic + f"/viconn/{addr:04X}/{get_msgid(msgid)}"
             jdata = {"retcode" : get_retcode(retcd),
                     "fctcode" : get_fctcode(fctcd),
                     "datalen" : dlen,
                     "data" : f"0x{utils.arr2hexstr(data)}" if data else "none"}
-            mod_mqtt.publish_smart(topic, json.dumps(jdata))
+            state.mqtt.publish_smart(topic, json.dumps(jdata))
 
 def get_msgid(val):
     if(val == 0): return "Vicon"
@@ -393,10 +412,9 @@ dicFunctionCodes = {
 # digs = len(str(settings.viconnVS1_ringbuff))
 # rb_pointer = 0
 def mqtt_publ_viconnVS1(data, request:bool):
-    global rb_pointer 
-    if(mod_mqtt is not None) and mod_mqtt.mqtt_client.is_connected():
+    if mqtt_connected():
         topic = settings.mqtt_topic + f"/viconn/{'Vicon' if request else 'Opto'}"
-        mod_mqtt.publish_smart(topic, utils.bbbstr(data))
+        state.mqtt.publish_smart(topic, utils.bbbstr(data))
 
 def get_fctcodeVS1(val):
     strg = dicFunctionCodesVS1.get(val) 
@@ -417,7 +435,8 @@ dicFunctionCodesVS1 = {
 def handle_exit(sig, frame):
     logger.info(f"received signal {sig}")
     utils.shutdown_event.set()
-    raise(SystemExit)
+    utils.restart_event.set()
+    utils.work_event.set()
     #os._exit(0)
 
 
@@ -425,11 +444,8 @@ def handle_exit(sig, frame):
 # Main
 # ------------------------
 def main():
-    global mod_mqtt
-    global poll_pointer, poll_cycle
-    global force_poll_flag, reload_poll_flag
-    global num_restarts, num_vicon_tries, progr_exit_flag
 
+    settings.validate()
     # Signale abfangen fuer sauberes Beenden
     signal.signal(signal.SIGTERM, handle_exit)
     signal.signal(signal.SIGINT, handle_exit)
@@ -442,6 +458,7 @@ def main():
     excptn = None
     first_time = True
     reset_retry_counters_time = -1
+    usb_failure = False
     tcp_thread = None
     vicon_thread = None
     tcp_stop_event = threading.Event()
@@ -451,15 +468,17 @@ def main():
         """
         sauber beenden: Tasks stoppen, VS1 Protokoll aktivieren(?), alle Verbindungen trennen        
         """
-        global progr_exit_flag
         nonlocal serOptolink, serVitoConnnect, excptn
         
-        progr_exit_flag = True
         # Schliessen der seriellen Schnittstellen, Ausgabedatei, PollTimer, 
         logger.info("exit close...")
+        state.measurements.invalidate_all()
+        if state.mqtt is not None:
+            state.mqtt.set_optolink_ready(False)
+            quality_tick(time.monotonic())
         tcp_stop_event.set()
         viconn_util.exit_flag = True
-        session = tcp_server
+        session = state.tcp
         if session is not None:
             session.stop()
         # Closing the ports interrupts a blocked listener. Always join the old
@@ -488,9 +507,9 @@ def main():
                 except Exception:
                     logger.exception("closing Optolink")
                 serOptolink = None
-        if mod_mqtt is not None:
+        if state.mqtt is not None:
             try:
-                mod_mqtt.exit_mqtt()
+                state.mqtt.exit_mqtt()
             except Exception:
                 logger.exception("closing MQTT")
         if(viconnlog.log_handle is not None):
@@ -511,31 +530,37 @@ def main():
         #if True:
 
             if first_time:
-                # do not restart in case of poll list problem
-                utils.shutdown_event.set()
+                # Fail fast on a missing or malformed initial poll list.
                 # ---------------------
                 # init the poll list 
                 # ---------------------
-                poll_list.make_list()
+                if not poll_list.make_list():
+                    utils.shutdown_event.set()
+                    logger.error("Initial poll list could not be loaded")
+                    raise ValueError("Initial poll list could not be loaded")
+                state.measurements.configure(poll_list.datapoint_metadata)
                 # buffer for read data for writing viessdata.csv 
                 poll_data = [None] * poll_list.num_items
 
-                utils.shutdown_event.clear()
                 first_time = False
             else:
                 # === this is a re-start ======
-                num_restarts += 1
-                if num_vicon_tries > settings.max_vicon_tries:
+                state.num_restarts += 1
+                if state.num_vicon_tries > settings.max_vicon_tries:
                     # continue without vitoconnect 
                     settings.port_vitoconnect = None
-                progr_exit_flag = False
                 utils.restart_event.clear()
-                utils.comm_errors = 0   # haus-fixes: sonst Neustart-Kaskade – upstream #260
+                utils.reset_comm_errors()
+                state.poll_pointer = 0
+                state.poll_cycle = 0
+                poll_data = [None] * poll_list.num_items
+                state.measurements.configure(poll_list.datapoint_metadata)
                 excptn = None
                 #reset_retry_counters_in(settings.retry_counters_reset)
                 reset_retry_counters_time = time.monotonic() + (60 * settings.retry_counters_reset)
-                logger.warning(f"re-start #{num_restarts}")
+                logger.warning(f"re-start #{state.num_restarts}")
 
+            usb_failure = False
             # ---------------------
             # open serial ports 
             # ---------------------
@@ -589,11 +614,12 @@ def main():
             # -------------------------------------------------------------
 
             # MQTT --------
+            state.mqtt = None
             if(settings.mqtt_broker is not None):
                 # avoid paho.mqtt required if not used
-                mod_mqtt = importlib.import_module("mqtt_util")
-                mod_mqtt.connect_mqtt()
-                mod_mqtt.command_callback = do_special_command      # type: ignore
+                state.mqtt = importlib.import_module("mqtt_util")
+                state.mqtt.connect_mqtt()
+                state.mqtt.command_callback = do_special_command      # type: ignore
 
 
             # TCP/IP connection --------
@@ -619,10 +645,10 @@ def main():
             # ----------------------
 
             if(serVitoConnnect is not None):
-                num_vicon_tries += 1
+                state.num_vicon_tries += 1
 
                 # reset vicon_request buffer
-                viconn_util.vicon_request = bytearray()
+                viconn_util.clear_requests()
 
                 # Vitoconncet logging
                 if(settings.log_vitoconnect):
@@ -652,11 +678,13 @@ def main():
                 logger.info(f"{spr} protocol initialized")
 
 
-            if mod_mqtt is not None:
-                mod_mqtt.set_optolink_ready(True)
+            if state.mqtt is not None:
+                state.mqtt.set_optolink_ready(True)
             # Preserve periodic cycle semantics without recurring Timer threads.
             poll_interval = settings.poll_interval
             next_poll_at = time.monotonic() + max(0, poll_interval)
+            next_quality_at = 0.0
+            mqtt_generation = -1
 
             # main loop initialisieren --------
             num_tasks = 3
@@ -667,17 +695,27 @@ def main():
             # +++++++++++++++++++++++++++            
             # main loop - Sachen abarbeiten 
             # +++++++++++++++++++++++++++            
-            while not utils.restart_event.is_set():
+            while not utils.restart_event.is_set() and not utils.shutdown_event.is_set():
+                utils.work_event.clear()
                 now = time.monotonic()
+                if state.mqtt is not None and mqtt_generation != state.mqtt.connection_generation:
+                    mqtt_generation = state.mqtt.connection_generation
+                    state.measurements.republish()
+                    # All cached data must be re-published, including once-only items.
+                    state.poll_pointer = 0
+                    state.poll_cycle = 0
+                if now >= next_quality_at:
+                    quality_tick(now)
+                    next_quality_at = now + 1.0
                 if settings.poll_interval != poll_interval:
                     poll_interval = settings.poll_interval
                     next_poll_at = now + max(0, poll_interval)
                 if poll_interval > 0 and now >= next_poll_at:
-                    if poll_pointer > poll_list.num_items:
-                        poll_pointer = 0
+                    if state.poll_pointer > poll_list.num_items:
+                        state.poll_pointer = 0
                     next_poll_at = now + poll_interval
-                elif poll_interval == 0 and poll_pointer > poll_list.num_items:
-                    poll_pointer = 0
+                elif poll_interval == 0 and state.poll_pointer > poll_list.num_items:
+                    state.poll_pointer = 0
                 # inits
                 did_vicon_request = False
                 did_secodary_request = False
@@ -694,6 +732,8 @@ def main():
                         # recive response an pass bytes directly back to VitoConnect, 
                         # returns when response is complete (or error or timeout) 
                         retcode, _, redata = vs12_adapter.receive_telegr(True, True, serOptolink, serVitoConnnect, vicon_publ_callback)     # type: ignore
+                        if retcode == 0xAA:
+                            raise serial.SerialException("Optolink USB connection lost")
                         viconnlog.do_log(redata, f"S {retcode:02x}")
                         olbreath(retcode)
                         did_vicon_request = True
@@ -707,49 +747,51 @@ def main():
 
                     # polling list --------
                     if(is_on == 0):
-                        if(poll_list.items):
+                        if(poll_list.items or state.reload_poll):
                             # === action commands =================
                             # force poll including onceonlies
-                            if force_poll_flag:
-                                poll_pointer = 0
-                                poll_cycle = 0
-                                force_poll_flag = False
-                                if(mod_mqtt): 
-                                    mod_mqtt.lst_force_refresh = []     # type: ignore
+                            if state.force_poll:
+                                state.poll_pointer = 0
+                                state.poll_cycle = 0
+                                state.force_poll = False
+                                if(state.mqtt): 
+                                    state.mqtt.lst_force_refresh = []     # type: ignore
                             # reload poll list, including onceonlies
-                            if reload_poll_flag:
-                                if mod_mqtt:
-                                    mod_mqtt.clear_pending_requests()
-                                poll_list.make_list(reload=True)
-                                if(len(poll_data) != poll_list.num_items):          # type: ignore
+                            if state.reload_poll:
+                                if state.mqtt:
+                                    state.mqtt.clear_pending_requests()
+                                if poll_list.make_list(reload=True):
+                                    state.measurements.configure(poll_list.datapoint_metadata)
                                     poll_data = [None] * poll_list.num_items
+                                else:
+                                    logger.error("Poll reload rejected; retaining previous list")
                                 publish_stats()
-                                poll_pointer = 0
-                                poll_cycle = 0
-                                reload_poll_flag = False
-                                if(mod_mqtt): 
-                                    mod_mqtt.lst_force_refresh = []     # type: ignore
+                                state.poll_pointer = 0
+                                state.poll_cycle = 0
+                                state.reload_poll = False
+                                if(state.mqtt): 
+                                    state.mqtt.lst_force_refresh = []     # type: ignore
 
                             # === check if something is forced =================
-                            if mod_mqtt and ((force_refresh_index := mod_mqtt.is_forced()) is not None):
+                            if state.mqtt and ((force_refresh_index := state.mqtt.is_forced()) is not None):
                                 retcode = do_poll_item(poll_data, serOptolink, item_index=force_refresh_index)      # type: ignore
                                 # we did something
                                 did_secodary_request = True
 
                             # === else do common poll if is on =================
-                            elif(0 <= poll_pointer < poll_list.num_items):
+                            elif(settings.poll_interval >= 0 and 0 <= state.poll_pointer < poll_list.num_items):
                                 retcode = do_poll_item(poll_data, serOptolink)      # type: ignore
                                 # increment poll pointer
-                                poll_pointer += 1
+                                state.poll_pointer += 1
 
                                 # +++ everything to be done after poll cycle completed ++++++++++
-                                if(poll_pointer >= poll_list.num_items):
+                                if(state.poll_pointer >= poll_list.num_items):
                                     # Viessdata csv
                                     if(settings.write_viessdata_csv):
                                         viessdata_util.buffer_csv_line(poll_data)       # type: ignore
                                     
                                     # wo1c energy
-                                    if(settings.wo1c_energy > 0) and (poll_cycle % settings.wo1c_energy == 0):
+                                    if(settings.wo1c_energy > 0) and (state.poll_cycle % settings.wo1c_energy == 0):
                                         if(not settings.vs1protocol):
                                             olbreath(retcode)
                                             retcode = wo1c_energy.read_energy(serOptolink)      # type: ignore
@@ -758,37 +800,41 @@ def main():
                                             settings.wo1c_energy = 0
                                     
                                     # poll cycle control
-                                    poll_cycle += 1
-                                    if(poll_cycle == 479001600):  # 1*2*3*4*5*6*7*8*9*10*11*12 < 32 bits
-                                        poll_cycle = 0
+                                    state.poll_cycle += 1
+                                    if(state.poll_cycle == 479001600):  # 1*2*3*4*5*6*7*8*9*10*11*12 < 32 bits
+                                        state.poll_cycle = 0
 
                                     # poll pointer control
-                                    poll_pointer += 1  # wegen  on_polltimer(): if(poll_pointer > poll_list.num_items)
+                                    state.poll_pointer += 1  # wegen  on_polltimer(): if(state.poll_pointer > poll_list.num_items)
                                     if(settings.poll_interval == 0):
                                         # continuous polling
-                                        poll_pointer = 0  # else: poll_pointer gets reset by timer
+                                        state.poll_pointer = 0  # else: state.poll_pointer gets reset by timer
                                 
                                 # we did something
                                 did_secodary_request = True
 
                     # MQTT request --------
                     elif(is_on == 1):
-                        if(mod_mqtt is not None):
-                            msg, readback = mod_mqtt.get_mqtt_request()
+                        if(state.mqtt is not None):
+                            msg, readback = state.mqtt.get_mqtt_request()
                             if(msg):
                                 try:
                                     retcode, _, _, resp = requests_util.response_to_request(msg, serOptolink)
-                                    mod_mqtt.publish_response(resp)
+                                    if retcode == 0xAA:
+                                        raise serial.SerialException("Optolink USB connection lost")
+                                    state.mqtt.publish_response(resp)
                                     if retcode == 1 and readback is not None:
-                                        mod_mqtt.force_delayed(readback, settings.readback_delay_set)
-                                except Exception as e:
-                                    mod_mqtt.publish_response(f"Error: {e}")
+                                        state.mqtt.force_delayed(readback, settings.readback_delay_set)
+                                except (serial.SerialException, OSError):
+                                    raise
+                                except (ValueError, TypeError, IndexError, OverflowError, NotImplementedError) as e:
+                                    state.mqtt.publish_response(f"Error: {e}")
                                     logger.warning(f"Error handling MQTT request {msg}: {e}")
                                 did_secodary_request = True
 
                     # TCP/IP request --------
                     elif(is_on == 2):
-                        session = tcp_server
+                        session = state.tcp
                         if session is not None:
                             msg = session.get_request()
                             if(msg):
@@ -802,9 +848,13 @@ def main():
                                         session.send("write commands disabled")
                                     else:
                                         retcode, _, _, resp = requests_util.response_to_request(msg, serOptolink)
+                                        if retcode == 0xAA:
+                                            raise serial.SerialException("Optolink USB connection lost")
                                         #print(f"retcode {retcode}, try to send tcp: {resp}")  #temp
                                         session.send(resp)
-                                except Exception as e:
+                                except (serial.SerialException, OSError):
+                                    raise
+                                except (ValueError, TypeError, IndexError, OverflowError, NotImplementedError) as e:
                                     logger.warning(f"Error handling TCP request {msg}: {e}")
                                     session.send(f"Error: {e}")
                                 did_secodary_request = True
@@ -821,21 +871,29 @@ def main():
 
                 # keep-alive with vs1 
                 if(settings.vs1protocol):
-                    if(time.monotonic() > last_vs1_comm + 0.5):
+                    if(time.monotonic() > state.last_vs1_comm + 0.5):
                         retcode,_,_ = vs12_adapter.read_datapoint_ext(0xf8, 2, serOptolink)     # type: ignore
+                        if retcode == 0xAA:
+                            raise serial.SerialException("Optolink USB connection lost")
                         olbreath(retcode)
                         did_secodary_request = True
 
                 # let cpu take a breath if there was nothing to do
                 if not (did_vicon_request or did_secodary_request):
-                    time.sleep(0.005) 
+                    utils.work_event.wait(0.1)
                 
                 # reset retry couters in case
                 if(reset_retry_counters_time > 0) and (time.monotonic() >= reset_retry_counters_time):
-                    num_restarts = 0 
-                    num_vicon_tries = 0
+                    state.num_restarts = 0 
+                    state.num_vicon_tries = 0
                     reset_retry_counters_time = -1
                 
+        except SystemExit:
+            raise
+        except (serial.SerialException, OSError) as e:
+            usb_failure = True
+            excptn = e
+            logger.warning(f"Serial/IO connection failed: {e}")
         except Exception as e:
             logger.exception("main")
             excptn = e
@@ -843,13 +901,13 @@ def main():
             close_everything()
             if utils.shutdown_event.is_set():
                 return
-            elif num_restarts >= settings.max_restarts:
+            elif state.num_restarts >= settings.max_restarts and not (usb_failure and settings.usb_reconnect_forever):
                 logger.error("too many restarts - exit script")
                 raise SystemExit(1)
             else:
-                logger.info(f"waiting {settings.restart_delay}s before re-start...")
-                utils.shutdown_event.wait(settings.restart_delay)
-                #utils.shutdown_event.wait(settings.restart_delay)
+                delay = reconnect_delay(settings.restart_delay, settings.restart_max_delay, state.num_restarts + 1)
+                logger.info(f"waiting {delay}s before re-start...")
+                utils.shutdown_event.wait(delay)
 
 
 if __name__ == "__main__":
