@@ -361,6 +361,9 @@ def handle_set_topic(topic: str, payload: bytes) -> Optional[tuple[str, str]]:
         if not topic.startswith(prefix):
             return None
         relative = topic[len(prefix):-4]
+        if settings.set_write_allowlist is not None and not settings.set_write_allowlist:
+            publish_response(f"/set {relative} rejected: writes disabled")
+            return None
         dpname = relative
         datapoint_info = poll_list.find_datapoint_by_name(dpname)
         if datapoint_info is None:
