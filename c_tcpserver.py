@@ -8,7 +8,7 @@ import utils
 #logger = logging.getLogger("tcptest.txt")
 
 class TcpServer:
-    def __init__(self, host: str, port: int, verbose: bool = False, legacy_idle: float | None = 0.1):
+    def __init__(self, host: str, port: int, verbose: bool = False, legacy_idle=0.1):
         self.host = host
         self.port = port
         self.verbose = verbose
