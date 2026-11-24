@@ -38,6 +38,21 @@ _sentinel = object()  # eindeutiger Wert fuer "nicht vorhanden"
 # callback for 'special' commands
 command_callback = None
 
+# haus-fixes: LWT "online" erst, wenn das Optolink-Protokoll initialisiert ist.
+# Sonst meldet jeder Neustartversuch bei getrenntem Kabel/aus geschaltetem Kessel kurz "online".
+optolink_ready = False
+
+
+def _lwt_payload():
+    return "online" if optolink_ready else "offline"
+
+
+def set_optolink_ready(ready:bool):
+    global optolink_ready
+    optolink_ready = bool(ready)
+    if mqtt_client is not None and mqtt_client.is_connected():
+        mqtt_client.publish(settings.mqtt_topic + "/LWT" , _lwt_payload(), qos=0,  retain=True)
+
 
 def on_connect(client, userdata, flags, reason_code, properties):
     # haus-fixes: abgelehnten Connect nicht als "online" melden; nach Reconnect alles neu senden – upstream #261
@@ -45,8 +60,8 @@ def on_connect(client, userdata, flags, reason_code, properties):
         logger.error(f"MQTT connect refused: {reason_code}")
         return
     reset_recent_list()
-    # publish LWT online
-    client.publish(settings.mqtt_topic + "/LWT" , "online", qos=0,  retain=True)
+    # publish LWT (online nur bei initialisiertem Optolink)
+    client.publish(settings.mqtt_topic + "/LWT" , _lwt_payload(), qos=0,  retain=True)
     # Subscribe to /set topics for writable datapoints
     subscriptions = [
         (settings.mqtt_topic + "/+/set", 0),
@@ -199,6 +214,8 @@ def reset_recent_list():
 
 
 def exit_mqtt():
+    global optolink_ready
+    optolink_ready = False
     if mqtt_client:
         logger.info("disconnect MQTT client")
         if(mqtt_client.is_connected()):

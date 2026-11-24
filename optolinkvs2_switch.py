@@ -628,6 +628,9 @@ def main():
                     raise Exception(f"init_protocol {spr} failed")  # schlecht fuer KW Protokoll
                 logger.info(f"{spr} protocol initialized")
 
+            # haus-fixes: erst jetzt LWT "online" (Optolink bzw. Vitoconnect betriebsbereit)
+            if(mod_mqtt is not None):
+                mod_mqtt.set_optolink_ready(True)
 
             # Polling Mechanismus --------
             if(settings.poll_interval > 0) and (poll_list.num_items > 0):
