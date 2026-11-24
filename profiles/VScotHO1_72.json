@@ -1,0 +1,69 @@
+{
+  "name": "VScotHO1_72",
+  "device_id": "20cb",
+  "version_min": 328,
+  "version_max": 345,
+  "source": "https://github.com/Xander2980/Haus-Roenkhausen/blob/fbcf97592b6c3fd123dd67b847844b2a6f2053f5/Heizung/Optolink/vitosoft_VScotHO1_72.tsv",
+  "roles": {
+    "burner": {
+      "name": "flammenstatus",
+      "address": 21982,
+      "length": 1,
+      "scale": 1
+    },
+    "modulation": {
+      "name": "brenner_modulation",
+      "address": 21971,
+      "length": 1,
+      "scale": 1
+    },
+    "boiler": {
+      "name": "kesseltemperatur",
+      "address": 2050,
+      "length": 2,
+      "scale": 0.1
+    },
+    "boiler_target": {
+      "name": "kesseltemperatur_soll",
+      "address": 21850,
+      "length": 2,
+      "scale": 0.1
+    },
+    "flow": {
+      "name": "vorlauftemperatur",
+      "address": 2064,
+      "length": 2,
+      "scale": 0.1
+    },
+    "starts_counter": {
+      "name": "brennerstarts",
+      "address": 2186,
+      "length": 4,
+      "scale": 1
+    },
+    "hours_counter": {
+      "name": "brenner_betriebsstunden",
+      "address": 2215,
+      "length": 4,
+      "scale": 0.00027777778
+    },
+    "pump": {
+      "name": "interne_pumpe_drehzahl",
+      "address": 30304,
+      "length": 2,
+      "scale": 1,
+      "filter": "b:1:1"
+    },
+    "outside": {
+      "name": "aussentemperatur",
+      "address": 2048,
+      "length": 2,
+      "scale": 0.1,
+      "signed": true
+    }
+  },
+  "burner_states": {
+    "0": 0,
+    "11": 1
+  }
+}
