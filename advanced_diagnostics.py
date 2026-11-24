@@ -123,6 +123,8 @@ class Heating:
 class Diagnostics:
     def __init__(self, config):
         self.config = config
+        self.heating_names = dict(config.heating_names)
+        self.burner_states = dict(config.burner_states)
         self.started = time.monotonic()
         self.cpu_sample = self.started, time.process_time()
         self.counters = Counter()
@@ -155,6 +157,13 @@ class Diagnostics:
                                 "code": "%02X" % code, "address": address,
                                 "data_hex": bytes(data[:128]).hex()})
     
+    def burner_value(self, value):
+        if value is None or not math.isfinite(value):
+            return None
+        if self.burner_states:
+            return self.burner_states.get(str(int(value))) if value == int(value) else None
+        return value if value in (0, 1) else None
+
     def observe(self, name, value, now, wall):
         rule = self.config.plausibility.get(name)
         n = number(value)
@@ -167,13 +176,13 @@ class Diagnostics:
         old = self.points.get(name)
         changed = now if old is None or value != old["value"] else old["changed"]
         self.points[name] = {"value": value, "at": now, "wall": wall, "changed": changed}
-        roles = self.config.heating_names
+        roles = self.heating_names
         def recent(role):
             point = self.points.get(roles.get(role))
             return number(point["value"]) if point and now - point["at"] <= self.config.heating_max_gap else None
         if name == roles.get("burner") or name == roles.get("boiler"):
             mod = recent("modulation")
-            self.heating.observe(recent("burner"), mod if mod is not None and 0 <= mod <= 100 else None,
+            self.heating.observe(self.burner_value(recent("burner")), mod if mod is not None and 0 <= mod <= 100 else None,
                                  recent("boiler"), now, wall,
                                  burner_sample=name == roles.get("burner"),
                                  boiler_sample=name == roles.get("boiler"))
@@ -204,25 +213,33 @@ class Diagnostics:
                                 "last_success": point["wall"], "valid": valid,
                                 "unchanged_warning": bool(valid and unchanged and now-point["changed"] > unchanged)}
         def role(key):
-            name = self.config.heating_names.get(key)
+            name = self.heating_names.get(key)
             point = self.points.get(name)
-            if not point or not point_rows[name]["valid"] or now - point["at"] > self.config.heating_max_gap:
+            if not point or not point_rows.get(name, {}).get("valid") or now - point["at"] > self.config.heating_max_gap:
                 return None
             return number(point["value"])
-        active, mod, boiler = role("burner"), role("modulation"), role("boiler")
+        active, mod, boiler = self.burner_value(role("burner")), role("modulation"), role("boiler")
         if mod is not None and not 0 <= mod <= 100:
             mod = None
         if active is None:
             self.heating.previous = self.heating.transition = None
         if boiler is None:
             self.heating.kessel = self.heating.slope = None
-        heat = self.heating.metrics(now, wall) if self.config.heating_names else {}
+        heat = self.heating.metrics(now, wall) if self.heating_names else {}
         flow, ret, target = role("flow"), role("return"), role("boiler_target")
-        if self.config.heating_names:
+        if self.heating_names:
             heat["spread_k"] = round(flow-ret, 2) if flow is not None and ret is not None else None
             heat["boiler_overshoot_k"] = round(boiler-target, 2) if boiler is not None and target is not None else None
             heat["burner_active"] = active
             heat["modulation_pct"] = mod
+            heat["start_attempts_total"] = role("starts_counter")
+            heat["burner_hours_total"] = role("hours_counter")
+            heat["pump_speed_pct"] = role("pump")
+            heat["outside_c"] = role("outside")
+            heat["boiler_c"] = boiler
+            heat["boiler_target_c"] = target
+            heat["flow_c"] = flow
+            heat["return_c"] = ret
         prev_t, prev_cpu = self.cpu_sample
         cpu = time.process_time()
         system = read_system()
@@ -241,7 +258,7 @@ class Diagnostics:
                              "modulation": mod, "burner": active})
         snapshot = {"time": wall, "optolink_ready": ready, "mqtt_connected": mqtt,
                     "system": system, "communication": stats, "queues": queues,
-                    "device": dict(self.device), "heating": heat, "datapoints": point_rows,
+                    "device": dict(self.device), "heating": heat, "heating_mapping": dict(self.heating_names), "datapoints": point_rows,
                     "polling": scheduler.snapshot(), "errors": list(self.errors),
                     "writes": list(self.audit), "history": list(self.history)}
         self.last_snapshot = snapshot

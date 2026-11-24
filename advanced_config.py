@@ -28,6 +28,8 @@ class AdvancedConfig:
     plausibility: dict = field(default_factory=dict)
     unchanged_warning_seconds: dict = field(default_factory=dict)
     heating_names: dict = field(default_factory=dict)
+    burner_states: dict = field(default_factory=dict)
+    auto_catalog_profile: bool = True
     heating_max_gap: float = 30
     short_burn_seconds: float = 300
     read_only: bool = False
@@ -48,7 +50,7 @@ class AdvancedConfig:
         except TypeError as exc:
             raise ValueError("Unknown advanced configuration key") from exc
         for name in ("enabled", "web_enabled", "read_only", "verified_writes",
-                     "detect_device", "require_profile_for_writes", "mqtt_discovery"):
+                     "detect_device", "require_profile_for_writes", "mqtt_discovery", "auto_catalog_profile"):
             if type(getattr(obj, name)) is not bool:
                 raise ValueError(name + " must be boolean")
         if type(obj.web_port) is not int or not 1 <= obj.web_port <= 65535:
@@ -67,7 +69,7 @@ class AdvancedConfig:
         if type(obj.history_points) is not int or not 60 <= obj.history_points <= 3600:
             raise ValueError("history_points must be 60..3600")
         for name in ("poll_overrides", "plausibility", "unchanged_warning_seconds",
-                     "heating_names", "device_profiles"):
+                     "heating_names", "device_profiles", "burner_states"):
             mapping = getattr(obj, name)
             if not isinstance(mapping, dict) or any(not isinstance(k, str) for k in mapping):
                 raise ValueError("Invalid " + name)
@@ -83,6 +85,8 @@ class AdvancedConfig:
             raise ValueError("Invalid unchanged_warning_seconds")
         if any(not isinstance(v, str) or not v for v in obj.heating_names.values()):
             raise ValueError("heating_names must map roles to datapoint names")
+        if any(not k.isdecimal() or type(v) is not int or v not in (0, 1) for k, v in obj.burner_states.items()):
+            raise ValueError("burner_states must map numeric strings to 0 or 1")
         fw = obj.firmware_datapoint
         if fw is not None and (not isinstance(fw, (tuple, list)) or len(fw) != 2 or type(fw[0]) is not int or not 0 <= fw[0] <= 65535 or type(fw[1]) is not int or not 1 <= fw[1] <= 250):
             raise ValueError("firmware_datapoint must be (address, length) or None")

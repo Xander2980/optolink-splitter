@@ -3,6 +3,7 @@ import json
 import time
 import serial
 from advanced_config import AdvancedConfig
+from advanced_profiles import Catalog
 from advanced_diagnostics import Diagnostics, SerialMeter
 from advanced_scheduler import Scheduler
 from advanced_web import SnapshotStore, start_web, stop_web
@@ -19,7 +20,9 @@ class AdvancedRuntime:
         self.config = AdvancedConfig.parse(raw)
         self.diag = Diagnostics(self.config)
         self.scheduler = Scheduler(self.config.poll_overrides, self.config.poll_bus_target)
-        self.store = SnapshotStore()
+        self.catalog = Catalog()
+        self.store = SnapshotStore(self.catalog)
+        self.catalog_profile = None
         self.web = None
         self.cycle_started = time.monotonic()
         self.last_cycles = 0
@@ -38,10 +41,27 @@ class AdvancedRuntime:
         stop_web(self.web)
         self.web = None
 
+    def apply_catalog_profile(self, ident, poll):
+        profile = self.catalog.match(ident) if self.config.auto_catalog_profile else None
+        roles = self.catalog.resolve(profile, poll)
+        previous = self.diag.heating_names
+        self.diag.heating_names = {**roles, **self.config.heating_names}
+        states = profile.get("burner_states", {}) if profile and roles.get("burner") and "burner" not in self.config.heating_names else {}
+        self.diag.burner_states = {**states, **self.config.burner_states}
+        if previous != self.diag.heating_names:
+            self.diag.heating.invalidate()
+        self.catalog_profile = profile
+        self.diag.device["catalog_profile"] = profile["name"] if profile else None
+        self.diag.device["catalog_missing_roles"] = sorted(set(profile.get("roles", {})) - set(roles)) if profile else []
+
     def configure(self, poll):
         self.scheduler.configure(poll.items, poll.cycle_groups, time.monotonic())
         self.diag.configure_points(poll.datapoint_metadata)
-        self.diag.set_device(self.diag.device.get("id"), poll.datapoint_metadata)
+        ident = self.diag.device.get("id")
+        firmware = self.diag.device.get("firmware_raw")
+        self.diag.set_device(ident, poll.datapoint_metadata)
+        self.diag.device["firmware_raw"] = firmware
+        self.apply_catalog_profile(ident, poll)
         unknown = set(self.config.poll_overrides) - set(poll.datapoint_metadata)
         if unknown:
             logger.warning("Unknown polling override names: %s", sorted(unknown))
@@ -51,6 +71,7 @@ class AdvancedRuntime:
 
     def identify(self, port, poll, pause):
         self.diag.set_device(None, poll.datapoint_metadata)
+        self.apply_catalog_profile(None, poll)
         if not self.config.detect_device:
             return
         if viconn_util.has_pending_requests():
@@ -64,10 +85,14 @@ class AdvancedRuntime:
         if code == 0xAA:
             raise serial.SerialException("USB removed during identification")
         if code == 1 and len(data) == 4:
-            self.diag.set_device(bytes(data).hex(), poll.datapoint_metadata)
+            ident = bytes(data).hex()
+            self.diag.set_device(ident, poll.datapoint_metadata)
+            self.apply_catalog_profile(ident, poll)
         pause(code)
         fw = self.config.firmware_datapoint
-        if fw:
+        if fw is None and self.catalog_profile and self.catalog_profile["name"] == "VScotHO1_72":
+            fw = (0x00FB, 1)
+        if fw and not viconn_util.has_pending_requests():
             started = time.monotonic()
             code, _, data = vs12_adapter.read_datapoint_ext(fw[0], fw[1], port)
             self.diag.transaction(code, time.monotonic()-started, "firmware", fw[0], data)

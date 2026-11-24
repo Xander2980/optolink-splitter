@@ -127,3 +127,8 @@ advanced = {
     "require_profile_for_writes": False,
     "mqtt_discovery": False,
 }
+
+# Additional catalogs: copy compatible Vitosoft TSV files and optional JSON profiles into profiles/.
+advanced["auto_catalog_profile"] = True
+# Explicit burner mapping overrides automatic profile state decoding if needed:
+# advanced["burner_states"] = {"0": 0, "11": 1}

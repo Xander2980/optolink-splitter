@@ -7,6 +7,7 @@ import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit, parse_qs
 from socketserver import ThreadingMixIn
 
 LOG = logging.getLogger(__name__)
@@ -14,7 +15,8 @@ ROOT = Path(__file__).resolve().parent / "web"
 
 
 class SnapshotStore:
-    def __init__(self):
+    def __init__(self, catalog=None):
+        self.catalog = catalog
         self.lock = threading.Lock()
         self.payload = b'{"optolink_ready":false,"mqtt_connected":false}'
 
@@ -92,6 +94,27 @@ def make_handler(store, password):
                 return self.reply(403, b"Forbidden", "text/plain")
             if self.path == "/api/status":
                 return self.reply(200, store.read(), "application/json; charset=utf-8")
+            path = urlsplit(self.path)
+            if path.path == "/api/catalog":
+                catalog = store.catalog
+                params = parse_qs(path.query)
+                if not catalog:
+                    value = {"lists": [], "errors": []}
+                elif "model" not in params:
+                    value = catalog.describe()
+                else:
+                    model = params["model"][0]
+                    query = params.get("q", [""])[0].casefold()[:120]
+                    access = params.get("access", [""])[0]
+                    try:
+                        offset = max(0, int(params.get("offset", ["0"])[0]))
+                    except ValueError:
+                        return self.reply(400, b"Invalid offset", "text/plain")
+                    entries = [row for row in catalog.lists.get(model, ())
+                               if (not access or row["access"] == access)
+                               and query in " ".join(str(row[k]) for k in ("name","address","conversion","unit")).casefold()]
+                    value = {"model": model, "count": len(entries), "rows": entries[offset:offset+100]}
+                return self.reply(200, json.dumps(value, ensure_ascii=False).encode(), "application/json; charset=utf-8")
             paths = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
                      "/style.css": ("style.css", "text/css")}
             item = paths.get(self.path)
