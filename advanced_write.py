@@ -41,6 +41,9 @@ def guarded_write(command, source, diag, read, execute, pause):
     if parsed is None:
         if cfg.verified_writes or cfg.require_profile_for_writes or diag.profile is not None:
             return reject("opaque_command")
+        if diag.last_write is not None and time.monotonic() - diag.last_write < cfg.write_min_interval:
+            return reject("rate_limit")
+        diag.last_write = time.monotonic()
         result = execute()
         return finish("unverified_legacy" if result[0] == 1 else "failed", result)
     addr, target = parsed
@@ -60,10 +63,10 @@ def guarded_write(command, source, diag, read, execute, pause):
         diag.last_write = time.monotonic()
         result = execute()
         return finish("accepted_unverified" if result[0] == 1 else "failed", result)
-    code, _, before = read(addr, len(target))
+    code, response_addr, before = read(addr, len(target))
     if code == 0xAA:
         return finish("usb_lost", (code, before, None, "USB connection lost"))
-    if code != 1 or len(before) != len(target):
+    if code != 1 or response_addr != addr or len(before) != len(target):
         return reject("pre_read_failed")
     event["before"] = bytes(before).hex()
     if before == target:
@@ -74,8 +77,8 @@ def guarded_write(command, source, diag, read, execute, pause):
     if result[0] != 1:
         return finish("write_failed", result)
     pause()
-    code, _, after = read(addr, len(target))
+    code, response_addr, after = read(addr, len(target))
     event["after"] = bytes(after).hex()
-    if code != 1 or after != target:
+    if code != 1 or response_addr != addr or after != target:
         return finish("verification_failed", (0xAA if code == 0xAA else 0xFC, bytearray(after), None, "write verification failed"))
     return finish("verified", result)

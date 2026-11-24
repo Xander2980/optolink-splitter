@@ -24,6 +24,7 @@ class AdvancedRuntime:
         self.cycle_started = time.monotonic()
         self.last_cycles = 0
         self.discovered = set()
+        self.generation = None
 
     def start(self):
         try:
@@ -51,6 +52,9 @@ class AdvancedRuntime:
     def identify(self, port, poll, pause):
         self.diag.set_device(None, poll.datapoint_metadata)
         if not self.config.detect_device:
+            return
+        if viconn_util.has_pending_requests():
+            logger.info('Device identification deferred to avoid delaying Vitoconnect')
             return
         # 0x00f8 / 4 bytes is the existing VS1 initialization identification read.
         # Treat the complete returned bytes as an opaque fingerprint, not a guessed model.
@@ -98,7 +102,9 @@ class AdvancedRuntime:
         except (ValueError, TypeError, IndexError, OverflowError, KeyError):
             self.diag.transaction(0xFB, time.monotonic()-start, source, address)
             raise
-        self.diag.transaction(result[0], time.monotonic()-start, source, address, result[1])
+        if result[0] == 0xAA:
+            self.diag.counters["usb_io_failures"] += 1
+        self.diag.transaction(result[0], time.monotonic()-start, source, address, result[1] or b"")
         return result
 
     def tick(self, state, connected, now, force=False):
@@ -123,7 +129,14 @@ class AdvancedRuntime:
         except (TypeError, ValueError):
             logger.exception("Dashboard snapshot encoding failed")
         if connected and state.mqtt:
-            self.publish(state.mqtt, snapshot)
+            try:
+                generation = state.mqtt.connection_generation
+                if generation != self.generation:
+                    self.discovered.clear()
+                    self.generation = generation
+                self.publish(state.mqtt, snapshot)
+            except (ValueError, TypeError, OSError):
+                logger.exception('Advanced telemetry publication failed')
 
     def publish(self, mqtt, snap):
         base = settings.mqtt_topic + "/advanced"
@@ -138,13 +151,17 @@ class AdvancedRuntime:
                     if self.config.mqtt_discovery and group != "device":
                         self.discovery(mqtt, group, key, topic)
         mqtt.publish_smart(base + "/errors", json.dumps(snap["errors"]), retain=True)
+        mqtt.publish_smart(base + "/writes", json.dumps(snap["writes"]), retain=False)
 
     def discovery(self, mqtt, group, key, topic):
         import hashlib
         identity = hashlib.sha256(settings.mqtt_topic.encode()).hexdigest()[:12]
         unique = "optolink_" + identity + "_" + group + "_" + key
-        # Publish discovery repeatedly after reconnect; redundant publishes are filtered by MQTT.
+        if unique in self.discovered:
+            return
         config = {"name": key.replace("_", " "), "unique_id": unique, "state_topic": topic,
                   "availability_topic": settings.mqtt_topic + "/LWT",
                   "device": {"identifiers": ["optolink_advanced_" + identity], "name": "Optolink Diagnostics"}}
-        mqtt.publish_smart("homeassistant/sensor/" + unique + "/config", json.dumps(config), qos=1, retain=True)
+        info = mqtt.publish_smart("homeassistant/sensor/" + unique + "/config", json.dumps(config), qos=1, retain=True, force=True)
+        if info is not None and info.rc == 0:
+            self.discovered.add(unique)

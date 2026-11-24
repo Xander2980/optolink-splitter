@@ -48,7 +48,6 @@ class Heating:
         self.segments = deque(maxlen=7200)
         self.day = None
         self.starts_today = 0
-        self.mod_sum = self.mod_seconds = 0.0
         self.kessel = None
         self.slope = None
 
@@ -141,6 +140,8 @@ class Diagnostics:
 
     def transaction(self, code, elapsed, source, address=None, data=b""):
         self.counters["transactions"] += 1
+        if source == "poll":
+            self.counters["poll_transactions"] += 1
         self.counters["success"] += int(code == 1)
         self.counters["code_%02x" % code] += 1
         if code == 0xFE:
@@ -157,6 +158,8 @@ class Diagnostics:
     def observe(self, name, value, now, wall):
         rule = self.config.plausibility.get(name)
         n = number(value)
+        if value is None or (isinstance(value, float) and not math.isfinite(value)):
+            return False
         if rule and (n is None or (rule[0] is not None and n < rule[0]) or
                      (rule[1] is not None and n > rule[1])):
             self.counters["implausible_values"] += 1

@@ -21,3 +21,13 @@ jobs:
       - run: python -m pip install "paho-mqtt>=2,<3" "pyserial>=3.5,<4"
       - run: python -m compileall -q .
       - run: python -m unittest discover -s tests -v
+      - run: node --check web/app.js
+        if: ${{ hashFiles('web/app.js') != '' }}
+      - run: python -m pip install coverage ruff mypy
+        if: ${{ hashFiles('advanced_runtime.py') != '' }}
+      - run: python -m coverage run --source=advanced_config,advanced_scheduler,advanced_diagnostics,advanced_write,advanced_web,advanced_runtime -m unittest discover -s tests -v && python -m coverage report
+        if: ${{ hashFiles('advanced_runtime.py') != '' }}
+      - run: ruff check advanced_*.py --select E9,F63,F7,F82
+        if: ${{ hashFiles('advanced_runtime.py') != '' }}
+      - run: mypy --follow-imports=silent --ignore-missing-imports advanced_scheduler.py advanced_config.py
+        if: ${{ hashFiles('advanced_runtime.py') != '' }}

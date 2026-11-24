@@ -69,6 +69,8 @@ def mqtt_connected() -> bool:
 def record_measurement(name: str, addr: int, value: Any) -> bool:
     if not valid_measurement(value):
         state.measurements.invalidate(name)
+        if state.advanced:
+            state.advanced.diag.points.pop(name, None)
         return False
     if state.advanced and not state.advanced.diag.observe(name, value, time.monotonic(), time.time()):
         state.measurements.invalidate(name)
@@ -176,6 +178,10 @@ def do_poll_item(poll_data: list, ser: serial.Serial, item_index: Optional[int] 
                             break
         else:
             state.measurements.invalidate(item[0])
+            if state.advanced:
+                state.advanced.diag.points.pop(item[0], None)
+                if state.advanced.config.heating_names.get("burner") == item[0]:
+                    state.advanced.diag.heating.invalidate()
             poll_data[list_index] = None
             logger.error(f"OL Error do_poll_item {state.poll_pointer}, Addr {item[1]:04X}, RetCode {retcode}, Data {val}")
         return retcode
@@ -944,7 +950,7 @@ def run_main() -> None:
         
                     #print(f"{((tnow := int(time.time()*10000)) - tprev)} ds {did_secodary_request}"); tprev = tnow
                             
-                    elif is_on == 3 and state.advanced and settings.poll_interval >= 0:
+                    elif is_on == 3 and state.advanced and settings.poll_interval >= 0 and not viconn_util.has_pending_requests():
                         job = state.advanced.scheduler.choose(time.monotonic())
                         if job:
                             name, index = job
