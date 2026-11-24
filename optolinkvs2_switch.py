@@ -140,21 +140,6 @@ def do_poll_item(poll_data, ser:serial.serial_for_url, item_index:int=None) -> i
 
 
 # poll timing is managed by the main loop (monotonic clock, no timer thread).
-# success, err msg
-        if(settings.vs1protocol):
-            last_vs1_comm = time.monotonic()
-            vs12_adapter.reset_vs1sync()
-        time.sleep(settings.olbreath)
-    elif(retcode in [0xFF, 0xAA, 0xAB]):
-        # timeout, err_handle, final item skipped in cycle
-        pass
-    else:
-        if(settings.vs1protocol):
-            last_vs1_comm = time.monotonic()
-            vs12_adapter.reset_vs1sync()
-        # allow calming down
-        time.sleep(2 * settings.olbreath)
-
 
 def olbreath(retcode:int):
     """
