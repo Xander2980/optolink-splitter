@@ -1,6 +1,7 @@
 import unittest
 import threading
 import json
+from unittest.mock import Mock, call, patch
 from urllib.request import urlopen
 from advanced_web import LimitedServer, make_handler, stop_web
 from advanced_profiles import Catalog
@@ -11,6 +12,43 @@ from advanced_config import AdvancedConfig
 from advanced_diagnostics import Diagnostics
 
 class CatalogRuntimeTests(unittest.TestCase):
+    def test_identifies_reported_device_and_reads_software_index(self):
+        a = AdvancedRuntime({})
+        poll = SimpleNamespace(datapoint_metadata={"flammenstatus": {
+            "addr": 0x55de, "len": 1, "scale_type": 1, "list_index": 0}},
+            items=[("a",)], cycle_groups={"a": 1})
+        port = Mock()
+        with patch("advanced_runtime.viconn_util.has_pending_requests", return_value=False), \
+             patch("advanced_runtime.vs12_adapter.read_datapoint_ext", side_effect=[
+                 (1, 0xf8, bytes.fromhex("20cb034f")), (1, 0xfb, b"\x4f")]) as read:
+            a.identify(port, poll, Mock())
+        self.assertEqual(read.call_args_list, [call(0xf8, 4, port), call(0xfb, 1, port)])
+        self.assertEqual(a.diag.device["id"], "20cb034f")
+        self.assertEqual(a.diag.device["catalog_profile"], "VScotHO1_72")
+        self.assertEqual(a.diag.device["firmware_raw"], "4f")
+        self.assertEqual(a.diag.heating_names, {"burner": "flammenstatus"})
+        self.assertEqual(a.diag.burner_value(11), 1)
+        self.assertIsNone(a.diag.profile)
+
+    def test_unknown_hardware_warns_without_granting_a_profile(self):
+        for enabled in (True, False):
+            with self.subTest(auto_catalog_profile=enabled):
+                a = AdvancedRuntime({"auto_catalog_profile": enabled})
+                poll = SimpleNamespace(datapoint_metadata={})
+                with patch("advanced_runtime.viconn_util.has_pending_requests", return_value=False), \
+                     patch("advanced_runtime.vs12_adapter.read_datapoint_ext",
+                           return_value=(1, 0xf8, bytes.fromhex("20cb044f"))), \
+                     patch("advanced_runtime.logger.warning") as warning:
+                    a.identify(Mock(), poll, Mock())
+                self.assertIsNone(a.diag.device["catalog_profile"])
+                self.assertEqual(a.diag.heating_names, {})
+                self.assertIsNone(a.diag.profile)
+                if enabled:
+                    warning.assert_called_once()
+                    self.assertEqual(warning.call_args.args[1:], ("20cb044f", 4, 79))
+                else:
+                    warning.assert_not_called()
+
     def test_burner_state_and_no_write_grant(self):
         a=AdvancedRuntime({})
         p=SimpleNamespace(datapoint_metadata={"flammenstatus":{"addr":0x55de,"len":1,"scale_type":1,"list_index":0}},items=[("a",)],cycle_groups={"a":1})

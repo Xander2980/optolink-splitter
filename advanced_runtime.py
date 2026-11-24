@@ -78,7 +78,7 @@ class AdvancedRuntime:
             logger.info('Device identification deferred to avoid delaying Vitoconnect')
             return
         # 0x00f8 / 4 bytes is the existing VS1 initialization identification read.
-        # Treat the complete returned bytes as an opaque fingerprint, not a guessed model.
+        # Keep the full fingerprint for write authorization; catalogs match HW/SW separately.
         started = time.monotonic()
         code, _, data = vs12_adapter.read_datapoint_ext(0x00f8, 4, port)
         self.diag.transaction(code, time.monotonic()-started, "identify", 0xf8, data)
@@ -88,6 +88,10 @@ class AdvancedRuntime:
             ident = bytes(data).hex()
             self.diag.set_device(ident, poll.datapoint_metadata)
             self.apply_catalog_profile(ident, poll)
+            if self.config.auto_catalog_profile and self.catalog_profile is None:
+                logger.warning(
+                    "No unambiguous catalog profile for device %s (hardware 0x%02X, software 0x%02X); "
+                    "automatic role mapping unavailable", ident, data[2], data[3])
         pause(code)
         fw = self.config.firmware_datapoint
         if fw is None and self.catalog_profile:

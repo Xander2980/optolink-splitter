@@ -20,7 +20,18 @@ class Catalog:
                 ident = p["device_id"]
                 if len(ident) != 4 or any(c not in "0123456789abcdef" for c in ident):
                     raise ValueError("invalid device ID")
-                if not 0 <= p["version_min"] <= p["version_max"] <= 65535:
+                if any(key in p for key in ("hardware_indices", "software_min", "software_max")):
+                    hardware = p["hardware_indices"]
+                    if not isinstance(hardware, list) or not hardware or any(
+                        type(value) is not int or not 0 <= value <= 255 for value in hardware
+                    ):
+                        raise ValueError("invalid hardware indices")
+                    if (type(p["software_min"]) is not int or type(p["software_max"]) is not int
+                            or not 0 <= p["software_min"] <= p["software_max"] <= 255):
+                        raise ValueError("invalid software range")
+                    if "version_min" in p or "version_max" in p:
+                        raise ValueError("mixed combined and split version constraints")
+                elif not 0 <= p["version_min"] <= p["version_max"] <= 65535:
                     raise ValueError("invalid version range")
                 for role, rule in p.get("roles", {}).items():
                     if not isinstance(rule["name"], str) or type(rule["address"]) is not int or type(rule["length"]) is not int:
@@ -67,12 +78,22 @@ class Catalog:
     def match(self, ident):
         if not isinstance(ident, str) or len(ident) < 8:
             return None
-        try:
-            version = int(ident[4:8], 16)
-        except ValueError:
+        ident = ident[:8].lower()
+        if any(c not in "0123456789abcdef" for c in ident):
             return None
-        matches = [p for p in self.profiles.values() if p["device_id"] == ident[:4].lower()
-                   and p["version_min"] <= version <= p["version_max"]]
+        hardware, software = int(ident[4:6], 16), int(ident[6:8], 16)
+        matches = []
+        for profile in self.profiles.values():
+            if profile["device_id"] != ident[:4]:
+                continue
+            if "hardware_indices" in profile:
+                compatible = (hardware in profile["hardware_indices"]
+                              and profile["software_min"] <= software <= profile["software_max"])
+            else:
+                # Preserve the meaning of existing third-party combined-version manifests.
+                compatible = profile["version_min"] <= int(ident[4:8], 16) <= profile["version_max"]
+            if compatible:
+                matches.append(profile)
         return matches[0] if len(matches) == 1 else None
 
     def describe(self):
