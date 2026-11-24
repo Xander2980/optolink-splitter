@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="de">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Optolink | Control Center</title><link rel="stylesheet" href="/style.css"><script defer src="/app.js"></script></head>
+<body><header><div><p class="eyebrow">VIESSMANN · RASPBERRY PI</p><h1>Optolink <span>Control Center</span></h1><p class="muted">Lokale Überwachung · Nur Lesezugriff</p></div><div id="status">Verbindung wird aufgebaut …</div></header>
+<main>
+<nav aria-label="Bereiche"><a href="#overview">Übersicht</a><a href="#history">Verlauf</a><a href="#data">Datenpunkte</a><a href="#system">System</a><a href="#events">Ereignisse</a></nav>
+<section id="overview"><h2>Heizungsübersicht</h2><div id="cards" class="cards"></div></section>
+<section id="history"><div class="sectionhead"><h2>Temperaturverlauf</h2><span class="muted">RAM-Verlauf · keine Cloud</span></div><div class="panel"><canvas id="chart" height="240" aria-label="Temperaturverlauf"></canvas><div class="legend"><span class="boiler">Kessel</span><span class="flow">Vorlauf</span><span class="return">Rücklauf</span></div></div></section>
+<section id="data"><div class="sectionhead"><h2>Datenpunkte</h2><input id="search" type="search" placeholder="Datenpunkt suchen" aria-label="Datenpunkt suchen"></div><div class="panel scroll"><table><thead><tr><th>Name</th><th>Wert</th><th>Letzte Messung</th><th>Status</th></tr></thead><tbody id="points"></tbody></table></div></section>
+<section id="system"><h2>System &amp; Kommunikation</h2><div class="columns"><div class="panel"><h3>Raspberry Pi</h3><dl id="sys"></dl></div><div class="panel"><h3>Optolink</h3><dl id="comm"></dl></div><div class="panel"><h3>Gerät &amp; Profil</h3><dl id="device"></dl></div><div class="panel"><h3>Polling &amp; Queues</h3><dl id="queues"></dl><dl id="polling"></dl></div></div></section>
+<section id="events"><h2>Ereignisse</h2><div class="columns"><div class="panel scroll"><h3>Kommunikationsfehler</h3><table><thead><tr><th>Zeit</th><th>Quelle</th><th>Code</th><th>Daten</th></tr></thead><tbody id="errors"></tbody></table></div><div class="panel scroll"><h3>Schreibprotokoll</h3><table><thead><tr><th>Zeit</th><th>Adresse</th><th>Ergebnis</th><th>Vorher → Nachher</th></tr></thead><tbody id="writes"></tbody></table></div></div></section>
+</main><footer id="updated">Noch keine Daten</footer></body></html>
