@@ -118,6 +118,7 @@ advanced = {
     "unchanged_warning_seconds": {},
     "heating_names": {},   # map roles burner, modulation, boiler, boiler_target, flow, return to exact poll-list names
     "heating_max_gap": 30,
+    "counter_max_gap": 900,  # seconds; rarely polled totals (starts, burner hours)
     "short_burn_seconds": 300,
     "read_only": False,     # blocks ALL secondary MQTT/TCP writes, including raw commands; not Vitoconnect
     "verified_writes": False,  # opt in after confirming readback-compatible addresses

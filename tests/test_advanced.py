@@ -99,6 +99,18 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(d.counters["serial_bytes_tx"], 3)
         self.assertEqual(d.counters["serial_bytes_rx"], 3)
 
+    def test_counters_use_longer_freshness_limit(self):
+        d = Diagnostics(AdvancedConfig.parse({"telemetry_interval":1, "heating_max_gap":120, "counter_max_gap":900,
+                                              "heating_names":{"hours_counter":"h", "outside":"o"}}))
+        d.observe("h", 54139.9, d.started, 1700000000)
+        d.observe("o", -3.5, d.started, 1700000000)
+        ok = {"h":SimpleNamespace(valid=True), "o":SimpleNamespace(valid=True)}
+        snap = d.tick(d.started+300, 1700000300, ok, True, False, {}, Scheduler({}), 0)
+        self.assertEqual(snap["heating"]["burner_hours_total"], 54139.9)
+        self.assertIsNone(snap["heating"]["outside_c"])
+        snap = d.tick(d.started+1000, 1700001000, ok, True, False, {}, Scheduler({}), 0)
+        self.assertIsNone(snap["heating"]["burner_hours_total"])
+
     def test_snapshot_masks_invalid_points_and_limits_history(self):
         d = Diagnostics(AdvancedConfig.parse({"history_points":60, "telemetry_interval":1}))
         d.observe("x", 30, 1, 1)

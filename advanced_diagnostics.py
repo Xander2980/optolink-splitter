@@ -215,7 +215,11 @@ class Diagnostics:
         def role(key):
             name = self.heating_names.get(key)
             point = self.points.get(name)
-            if not point or not point_rows.get(name, {}).get("valid") or now - point["at"] > self.config.heating_max_gap:
+            # Slowly changing totals are polled rarely; allow a longer age for them.
+            gap = self.config.heating_max_gap
+            if key in ("starts_counter", "hours_counter"):
+                gap = max(gap, self.config.counter_max_gap)
+            if not point or not point_rows.get(name, {}).get("valid") or now - point["at"] > gap:
                 return None
             return number(point["value"])
         active, mod, boiler = self.burner_value(role("burner")), role("modulation"), role("boiler")

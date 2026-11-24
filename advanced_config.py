@@ -32,6 +32,7 @@ class AdvancedConfig:
     burner_states: dict = field(default_factory=dict)
     auto_catalog_profile: bool = True
     heating_max_gap: float = 30
+    counter_max_gap: float = 900
     short_burn_seconds: float = 300
     read_only: bool = False
     verified_writes: bool = False
@@ -60,7 +61,7 @@ class AdvancedConfig:
             raise ValueError("Invalid web_host")
         if not isinstance(obj.web_password_env, str) or not obj.web_password_env:
             raise ValueError("Invalid web_password_env")
-        for name in ("telemetry_interval", "heating_max_gap", "short_burn_seconds"):
+        for name in ("telemetry_interval", "heating_max_gap", "counter_max_gap", "short_burn_seconds"):
             if not finite(getattr(obj, name)) or getattr(obj, name) < 1:
                 raise ValueError("Invalid " + name)
         if not finite(obj.write_min_interval) or obj.write_min_interval < 0:
