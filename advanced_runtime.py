@@ -90,8 +90,8 @@ class AdvancedRuntime:
             self.apply_catalog_profile(ident, poll)
         pause(code)
         fw = self.config.firmware_datapoint
-        if fw is None and self.catalog_profile and self.catalog_profile["name"] == "VScotHO1_72":
-            fw = (0x00FB, 1)
+        if fw is None and self.catalog_profile:
+            fw = self.catalog_profile.get("firmware_datapoint")
         if fw and not viconn_util.has_pending_requests():
             started = time.monotonic()
             code, _, data = vs12_adapter.read_datapoint_ext(fw[0], fw[1], port)

@@ -25,7 +25,7 @@ jobs:
         if: ${{ hashFiles('web/app.js') != '' }}
       - run: python -m pip install coverage ruff mypy
         if: ${{ hashFiles('advanced_runtime.py') != '' }}
-      - run: python -m coverage run --source=advanced_config,advanced_scheduler,advanced_diagnostics,advanced_write,advanced_web,advanced_runtime -m unittest discover -s tests -v && python -m coverage report
+      - run: python -m coverage run --source=advanced_config,advanced_scheduler,advanced_diagnostics,advanced_write,advanced_web,advanced_runtime,advanced_profiles -m unittest discover -s tests -v && python -m coverage report
         if: ${{ hashFiles('advanced_runtime.py') != '' }}
       - run: ruff check advanced_*.py --select E9,F63,F7,F82
         if: ${{ hashFiles('advanced_runtime.py') != '' }}

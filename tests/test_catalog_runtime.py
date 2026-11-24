@@ -1,4 +1,10 @@
 import unittest
+import threading
+import json
+from urllib.request import urlopen
+from advanced_web import LimitedServer, make_handler, stop_web
+from advanced_profiles import Catalog
+from advanced_web import SnapshotStore
 from types import SimpleNamespace
 from advanced_runtime import AdvancedRuntime
 from advanced_config import AdvancedConfig
@@ -21,3 +27,19 @@ class CatalogRuntimeTests(unittest.TestCase):
         a=Diagnostics(AdvancedConfig.parse({"heating_names":{"burner":"manual"},"burner_states":{"3":1}}))
         self.assertEqual(a.burner_value(3),1)
         self.assertIsNone(a.burner_value(11))
+
+    def test_catalog_http_search(self):
+        store = SnapshotStore(Catalog())
+        server = LimitedServer(("127.0.0.1", 0), make_handler(store, ""))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        url = "http://127.0.0.1:%d/api/catalog" % server.server_address[1]
+        try:
+            with urlopen(url, timeout=2) as response:
+                self.assertTrue(any(x["name"] == "VScotHO1_72" for x in json.load(response)["lists"]))
+            with urlopen(url + "?model=VScotHO1_72&q=0x0810&access=R", timeout=2) as response:
+                result = json.load(response)
+                self.assertGreater(result["count"], 0)
+                self.assertTrue(all(x["address"] == "0x0810" for x in result["rows"]))
+        finally:
+            stop_web((server, thread))

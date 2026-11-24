@@ -31,6 +31,9 @@ class Catalog:
                         raise ValueError("invalid scale")
                 if any(not k.isdecimal() or type(v) is not int or v not in (0, 1) for k,v in p.get("burner_states", {}).items()):
                     raise ValueError("invalid burner states")
+                fw = p.get("firmware_datapoint")
+                if fw is not None and (not isinstance(fw, list) or len(fw) != 2 or type(fw[0]) is not int or not 0 <= fw[0] <= 65535 or type(fw[1]) is not int or not 1 <= fw[1] <= 250):
+                    raise ValueError("invalid firmware datapoint")
                 self.profiles[path.stem] = p
             except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
                 self.errors.append(f"{path.name}: {exc}")
