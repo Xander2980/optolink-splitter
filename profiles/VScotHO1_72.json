@@ -55,6 +55,13 @@
       "scale": 1,
       "filter": "b:1:1"
     },
+    "pump_hk1": {
+      "name": "hkp_hk1_drehzahl",
+      "address": 30307,
+      "length": 2,
+      "scale": 1,
+      "filter": "b:1:1"
+    },
     "outside": {
       "name": "aussentemperatur",
       "address": 2048,

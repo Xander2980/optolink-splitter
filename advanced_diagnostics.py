@@ -239,6 +239,7 @@ class Diagnostics:
             heat["start_attempts_total"] = role("starts_counter")
             heat["burner_hours_total"] = role("hours_counter")
             heat["pump_speed_pct"] = role("pump")
+            heat["pump_hk1_speed_pct"] = role("pump_hk1")
             heat["outside_c"] = role("outside")
             heat["boiler_c"] = boiler
             heat["boiler_target_c"] = target
