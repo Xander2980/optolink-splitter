@@ -71,6 +71,10 @@ dec_separator = ","             # Decimal separator for CSV output (default: ","
 no_logger_file = False          # if True the optolinksvs2_switch.log will not get written
 log_level = 20                  # DEBUG=10, INFO=20, WARNING=30, ERROR=40, CRITICAL=50,
 max_restarts = 5                # re-start limit. counter gets reset after retry_counters_reset minutes of successful operation 
+usb_reconnect_forever = True    # retry a disconnected Optolink USB adapter indefinitely
+restart_max_delay = 120         # cap exponential reconnect delay
+poll_read_retries = 1           # extra attempts for transient polling failures, never writes
+poll_stale_after = 0            # 0: automatic freshness; positive: override in seconds
 restart_delay = 10              # seconds delay before re-starting 
 max_vicon_tries = 3             # limit for vicon tries. if exceeded, continuing without vitoconnect
 max_comm_errors = 10            # optolink comm error threshold to init restart

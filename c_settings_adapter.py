@@ -21,6 +21,7 @@
 ###########################################
 
 import importlib
+import math
 #from logger_util import logger  # circular import
 
 
@@ -100,6 +101,10 @@ class SettingsAdapter:
         self.no_logger_file =  False            # if True the optolinksvs2_switch.log will not get written
         self.log_level = 20                     # DEBUG=10, INFO=20, WARNING=30, ERROR=40, CRITICAL=50,
         self.max_restarts = 5                   # re-start limit. counter gets reset after sucessful {retry_counters_reset} minutes successful operation 
+        self.usb_reconnect_forever = True
+        self.restart_max_delay = 120
+        self.poll_read_retries = 1
+        self.poll_stale_after = 0
         self.restart_delay = 10                 # seconds delay before re-starting 
         self.max_vicon_tries = 3                # limit for vicon tries. if exceeded, continuing without vitoconnect. should be less than max_restarts
         self.max_comm_errors = 10               # optolink comm error threshold to init restart
@@ -120,7 +125,8 @@ class SettingsAdapter:
         self.set_settings(SETTINGS_MODULE)
 
 
-    def set_settings(self, settings_module:str = '', reload:bool = False):
+    def set_settings(self, settings_module:str = '', reload:bool = False) -> bool:
+        previous = self.__dict__.copy()
         # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         #  Here we take the settings from a module if exist there, 
         #  otherwise keep value unchanged 
@@ -131,7 +137,7 @@ class SettingsAdapter:
                 self._settings_obj = importlib.import_module(settings_module)
             except Exception as e:
                 print(f"ERROR importing settings module: {e}")
-                return
+                return False
         
         # if not self._settings_obj:
         #     logger.error("set_settings: no settings object set")
@@ -142,7 +148,7 @@ class SettingsAdapter:
                 self._settings_obj = importlib.reload(self._settings_obj)
             except Exception as e:
                 print(f"ERROR reload settings module: {e}")
-                return
+                return False
 
 
         # General Settings +++++++++++
@@ -150,6 +156,10 @@ class SettingsAdapter:
         self.no_logger_file = getattr(self._settings_obj, 'no_logger_file', self.no_logger_file)
         self.log_level = getattr(self._settings_obj, 'log_level', self.log_level)
         self.max_restarts = getattr(self._settings_obj, 'max_restarts', self.max_restarts)
+        self.usb_reconnect_forever = getattr(self._settings_obj, 'usb_reconnect_forever', self.usb_reconnect_forever)
+        self.restart_max_delay = getattr(self._settings_obj, 'restart_max_delay', self.restart_max_delay)
+        self.poll_read_retries = getattr(self._settings_obj, 'poll_read_retries', self.poll_read_retries)
+        self.poll_stale_after = getattr(self._settings_obj, 'poll_stale_after', self.poll_stale_after)
         self.restart_delay = getattr(self._settings_obj, 'restart_delay', self.restart_delay)
         self.max_vicon_tries = getattr(self._settings_obj, 'max_vicon_tries', self.max_vicon_tries)
         self.max_comm_errors = getattr(self._settings_obj, 'max_comm_errors', self.max_comm_errors)               
@@ -225,6 +235,74 @@ class SettingsAdapter:
         foreign_interval = getattr(self._settings_obj, 'poll_interval', None)
         if foreign_interval is not None:
             self.poll_interval = foreign_interval
+        try:
+            self.validate()
+        except ValueError:
+            self.__dict__.update(previous)
+            raise
+        return True
+
+    def validate(self) -> None:
+        def number(name, minimum, integer=False):
+            value = getattr(self, name)
+            if (type(value) not in (int, float) or not math.isfinite(value)
+                    or value < minimum or (integer and type(value) is not int)):
+                raise ValueError(f"Invalid {name}: {value!r}")
+        for name in ("vs2timeout", "fullraw_timeout", "fullraw_eot_time", "restart_delay", "restart_max_delay"):
+            number(name, 0.001)
+        for name in ("olbreath", "readback_delay_set", "poll_stale_after", "retry_counters_reset"):
+            number(name, 0)
+        for name in ("max_restarts", "max_vicon_tries", "poll_read_retries", "wo1c_energy", "max_decimals"):
+            number(name, 0, True)
+        for name in ("max_comm_errors", "buffer_to_write"):
+            number(name, 1, True)
+        number("poll_interval", -1, True)
+        if self.poll_read_retries > 3:
+            raise ValueError("poll_read_retries must be 0..3")
+        if self.restart_max_delay < self.restart_delay:
+            raise ValueError("restart_max_delay must be >= restart_delay")
+        if self.fullraw_eot_time > self.fullraw_timeout:
+            raise ValueError("fullraw_eot_time exceeds fullraw_timeout")
+        if self.tcp_legacy_idle is not None:
+            number("tcp_legacy_idle", 0.001)
+        if self.tcpip_port is not None and (type(self.tcpip_port) is not int or not 1 <= self.tcpip_port <= 65535):
+            raise ValueError("tcpip_port must be None or 1..65535")
+        if not isinstance(self.tcpip_host, str) or not isinstance(self.port_optolink, str) or not self.port_optolink:
+            raise ValueError("Invalid serial port or TCP bind host")
+        if self.port_vitoconnect is not None and (not isinstance(self.port_vitoconnect, str) or not self.port_vitoconnect):
+            raise ValueError("Invalid port_vitoconnect")
+        if self.mqtt_broker is not None:
+            parse_broker(self.mqtt_broker)
+            if not isinstance(self.mqtt_topic, str) or not self.mqtt_topic or any(c in self.mqtt_topic for c in "#+\0"):
+                raise ValueError("Invalid MQTT topic")
+        if (self.mqtt_tls_certfile is None) != (self.mqtt_tls_keyfile is None):
+            raise ValueError("MQTT client certificate and key must be configured together")
+        if self.set_write_allowlist is not None and (not isinstance(self.set_write_allowlist, (set, frozenset, list, tuple)) or not all(isinstance(x, str) for x in self.set_write_allowlist)):
+            raise ValueError("set_write_allowlist must be a collection of names or None")
+        if not isinstance(self.write_limits, dict):
+            raise ValueError("write_limits must be a dictionary")
+        for name, limits in self.write_limits.items():
+            if not isinstance(name, str) or not isinstance(limits, (tuple, list)) or len(limits) != 2:
+                raise ValueError("Invalid write_limits entry")
+            lo, hi = limits
+            if any(x is not None and (type(x) not in (int, float) or not math.isfinite(x)) for x in limits):
+                raise ValueError(f"Invalid write limits for {name}")
+            if lo is not None and hi is not None and lo > hi:
+                raise ValueError(f"Reversed write limits for {name}")
+        for name in ("usb_reconnect_forever", "cmnd_write_allowed", "vs1protocol", "mqtt_retain", "mqtt_no_redundant", "mqtt_tls_enable", "mqtt_tls_skip_verify"):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"{name} must be boolean")
+
+
+def parse_broker(value: str) -> tuple[str, int]:
+    if not isinstance(value, str):
+        raise ValueError("mqtt_broker must be host:port")
+    host, sep, port = value.rpartition(":")
+    if not sep or not host or not port.isdigit() or not 1 <= int(port) <= 65535:
+        raise ValueError("mqtt_broker must be host:port")
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    return host, int(port)
 
 
 # === for global use ==================

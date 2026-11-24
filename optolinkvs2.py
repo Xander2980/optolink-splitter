@@ -80,6 +80,8 @@ def read_datapoint(addr:int, rdlen:int, ser:serial.Serial) -> bytes:
     return data
 
 def read_datapoint_ext(addr:int, rdlen:int, ser:serial.Serial) -> tuple[int, int, bytearray]: 
+    if not 0 <= addr <= 0xFFFF or not 1 <= rdlen <= 255:
+        raise ValueError("Invalid VS2 read address or length")
     outbuff = bytearray(8)
     outbuff[0] = 0x41   # 0x41 Telegrammstart
     outbuff[1] = 0x05   # Len Payload, hier immer 5
@@ -111,6 +113,8 @@ def write_datapoint(addr:int, data:bytes, ser:serial.Serial) -> bool:
 
 def write_datapoint_ext(addr:int, data:bytes, ser:serial.Serial) -> tuple[int, int, bytearray]:
     wrlen = len(data)
+    if not 0 <= addr <= 0xFFFF or not 1 <= wrlen <= 250:
+        raise ValueError("Invalid VS2 write address or length")
     outbuff = bytearray(wrlen+8)
     outbuff[0] = 0x41   # 0x41 Telegrammstart
     outbuff[1] = 5 + wrlen  # Len Payload
@@ -138,6 +142,8 @@ def write_datapoint_ext(addr:int, data:bytes, ser:serial.Serial) -> tuple[int, i
 
 
 def do_request(ser:serial.Serial, fctcode:int, addr:int, rlen:int, data:bytes=b'', protid=0x00) -> tuple[int, int, bytearray]:
+    if not 0 <= addr <= 0xFFFF or not 0 <= rlen <= 255 or len(data) > 250 or not 0 <= fctcode <= 255 or not 0 <= protid <= 255:
+        raise ValueError("Invalid VS2 request fields")
     pldlen = 5 + len(data)
     outbuff = bytearray(pldlen + 3)  # + STX, LEN, CRC
     outbuff[0] = 0x41                # 0x41 Telegrammstart
@@ -229,7 +235,7 @@ def receive_telegr(resptelegr:bool, raw:bool, ser:serial.Serial, ser2:serial.Ser
             if(inbytes):
                 inbuff += inbytes
                 alldata += inbytes
-        except:
+        except (serial.SerialException, OSError):
             utils.comm_error(True)
             return 0xAA, 0, retdata
 
@@ -340,38 +346,13 @@ def receive_telegr(resptelegr:bool, raw:bool, ser:serial.Serial, ser2:serial.Ser
     return 0xFF, addr, retdata
 
 
-def receive_fullraw(eot_time, timeout, ser:serial.Serial, ser2:serial.Serial=None) -> tuple[int, bytearray]:        # type: ignore
-    # times in seconds
-    inbuff = b''
-    start_time = time.monotonic()
-    last_receive_time = start_time
-
-    while True:
-        time.sleep(0.005)
-        # Zeichen vom Serial Port lesen
-        inbytes = ser.read_all()
-
-        if inbytes:
-            # Daten zum Datenpuffer hinzufuegen
-            inbuff += inbytes
-            last_receive_time = time.monotonic()
-            if(ser2 is not None):
-                ser2.write(inbytes)
-        elif inbuff and (time.monotonic() > last_receive_time + eot_time):
-            # if data received and no further receive since more than eot_time
-            if(settings.show_opto_rx):
-                print("rx", utils.bbbstr(inbuff))
-            utils.comm_error(False)
-            return 0x01, bytearray(inbuff)
-
-        if(time.monotonic() > start_time + timeout):
-            if(settings.show_opto_rx):
-                print("rx fullraw timeout", utils.bbbstr(inbuff))
-            utils.comm_error(True)
-            return 0xFF, bytearray(inbuff)
+def receive_fullraw(eot_time: float, timeout: float, ser: serial.Serial, ser2=None) -> tuple[int, bytearray]:
+    retcode, data = utils.receive_raw_serial(eot_time, timeout, ser, ser2)
+    utils.comm_error(retcode != 1)
+    return retcode, data
 
 
-def calc_crc(telegram) -> int:
+def calc_crc(telegram: bytes) -> int:
     # CRC, a modulo-256 addition of bytes from Block Length and the additional bytes.
     firstbyte = 1  # ignore leading STX 0x41
     lastbyte = telegram[1] + 1  # len payload + len byte itself

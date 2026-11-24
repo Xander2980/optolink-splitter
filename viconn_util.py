@@ -16,6 +16,7 @@
 
 import serial
 import time
+from queue import Queue, Empty, Full
 
 import utils
 import vs12_adapter
@@ -91,7 +92,7 @@ def detect_vs1(serVicon:serial.Serial, serOpto:serial.Serial, timeout:float) -> 
                 bufferVicon.append(byte)
             viconnlog.do_log(dataVicon, "M")
             # vs1 request received?
-            if (len(bufferVicon) > 4) and (bufferVicon[0:1] == [0x01, 0xF7]):
+            if (len(bufferVicon) > 4) and (bufferVicon[0:2] == [0x01, 0xF7]):
                 expctdlen = int(bufferVicon[4])
             elif (len(bufferVicon) > 3) and (bufferVicon[0] == 0xF7):
                 expctdlen = int(bufferVicon[3])
@@ -119,31 +120,42 @@ def detect_vs1(serVicon:serial.Serial, serOpto:serial.Serial, timeout:float) -> 
             return False
 
 
-# viconn request mechanism -------------
-vicon_request = bytearray()
+# Bound queued master requests and avoid a producer/consumer race.
+_vicon_requests = Queue(maxsize=16)
 
-def listen_to_Vitoconnect(servicon:serial.Serial, pubcallback = None):
-    global vicon_request
+
+def clear_requests() -> None:
+    while True:
+        try:
+            _vicon_requests.get_nowait()
+        except Empty:
+            return
+
+
+def listen_to_Vitoconnect(servicon: serial.Serial, pubcallback=None) -> None:
     timeout = 0
-    while(not exit_flag):
-        #retcode, _, data = optolinkvs2.receive_telegr(False, True, servicon, mqtt_publ_callback=pubcallback)  # contains sleep(0.005)
-        retcode, _, data = vs12_adapter.receive_telegr(False, True, servicon, mqtt_publ_callback=pubcallback)  # contains sleep(0.005)
-        if(retcode == 0x01):
-            vicon_request = data
+    while not exit_flag:
+        retcode, _, data = vs12_adapter.receive_telegr(
+            False, True, servicon, mqtt_publ_callback=pubcallback)
+        if exit_flag:
+            return
+        if retcode == 0x01:
+            try:
+                _vicon_requests.put_nowait(data)
+            except Full as exc:
+                raise RuntimeError("Vitoconnect queue overflow; resync required") from exc
+            utils.work_event.set()
             timeout = 0
-        elif(retcode == 0xff) and (timeout < 1):
+        elif retcode == 0xff and timeout < 1:
             timeout += 1
             viconnlog.do_log(data, f"TO {timeout}")
         else:
             viconnlog.do_log(data, f"X {retcode:02x}")
-            # protocol reset request as preparation for the new VS2 detection (kommt wahscheinlich nicht durch, aber ...)
-            vicon_request = bytearray([0x04])
-            raise Exception(f"Error {retcode:02x} in receive_vs2telegr, data: {utils.bbbstr(data)}")
+            raise RuntimeError(f"Error {retcode:02x} receiving Vitoconnect request")
 
 
 def get_vicon_request() -> bytearray:
-    global vicon_request
-    ret = vicon_request
-    vicon_request = bytearray()
-    return ret
-
+    try:
+        return _vicon_requests.get_nowait()
+    except Empty:
+        return bytearray()

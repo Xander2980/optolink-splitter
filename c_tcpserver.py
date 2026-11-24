@@ -28,7 +28,7 @@ class TcpServer:
     # ---------------------------------------------------------
     # Startet den Server
     # ---------------------------------------------------------
-    def run(self):
+    def run(self) -> None:
         if self.exit_flag:
             return
         self.requests = Queue(maxsize=128)
@@ -51,7 +51,7 @@ class TcpServer:
     # ---------------------------------------------------------
     # auf Verbindung warten (Endlosschleife)
     # ---------------------------------------------------------
-    def _wait_for_client(self):
+    def _wait_for_client(self) -> None:
         if not self.server_socket or self.exit_flag:
             return
         
@@ -72,12 +72,13 @@ class TcpServer:
     # ---------------------------------------------------------
     # Empfangen (Endlosschleife)
     # ---------------------------------------------------------
-    def _enqueue(self, data):
+    def _enqueue(self, data: bytes) -> None:
         msg = data.decode("utf-8").strip().replace('"', "").replace("'", "")
         if msg:
             self.requests.put_nowait(msg)
+            utils.work_event.set()
 
-    def _listen(self):
+    def _listen(self) -> None:
         if not self.client_socket or self.exit_flag:
             return
         sock = self.client_socket
@@ -111,17 +112,19 @@ class TcpServer:
     # ---------------------------------------------------------
     # Sendet Antwort an den Client
     # ---------------------------------------------------------
-    def send(self, data):
+    def send(self, data) -> None:
         if isinstance(data, str):
             if self.verbose:
                 logger.info(f"TCP send: {data}")
             data = data.encode("utf-8") + b"\n"
 
         try:
-            self.client_socket.sendall(data)
+            sock = self.client_socket
+            if sock is not None:
+                sock.sendall(data)
             if self.verbose:
                 logger.info(f"TCP sent: {utils.bbbstr(data)}")
-        except Exception as e:
+        except OSError as e:
             logger.warning(f"TCP send failed: {e}, data: {repr(str(data))}")
 
     # ---------------------------------------------------------
@@ -136,7 +139,7 @@ class TcpServer:
     # ---------------------------------------------------------
     # Schliesst alles
     # ---------------------------------------------------------
-    def stop(self):
+    def stop(self) -> None:
         logger.info("closing TCP Server")
 
         self.exit_flag = True
@@ -144,14 +147,14 @@ class TcpServer:
         try:
             if self.client_socket:
                 self.client_socket.close()
-        except:
+        except OSError:
             pass
         self.client_socket = None
 
         try:
             if self.server_socket:
                 self.server_socket.close()
-        except:
+        except OSError:
             pass
         self.server_socket = None
 

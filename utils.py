@@ -19,26 +19,36 @@ from datetime import datetime
 from c_settings_adapter import settings
 from logger_util import logger
 import threading
+import time
+import serial
 
 
 # hier zur Vermeidung von circular imports und weil hier von fast überall erreichbar
 # Threading-Events zur Steuerung von Neustarts und Beenden
 restart_event = threading.Event()
 shutdown_event = threading.Event()
+work_event = threading.Event()
+_comm_lock = threading.Lock()
 
 
 comm_errors = 0
-def comm_error(is_error:bool):
-    """Count OL comm errors and initiate re-start on threshold"""
+def comm_error(is_error: bool) -> None:
     global comm_errors
-    if is_error:
-        comm_errors += 2
-        if comm_errors >= 2 * settings.max_comm_errors:
-            logger.error("Optolink comm error threshold reached - initiate re-start")
-            restart_event.set()
-    elif comm_errors > 0:
-        comm_errors -= 1
+    with _comm_lock:
+        if is_error:
+            comm_errors += 2
+            if comm_errors >= 2 * settings.max_comm_errors:
+                logger.error("Optolink comm error threshold reached - initiate re-start")
+                restart_event.set()
+                work_event.set()
+        elif comm_errors > 0:
+            comm_errors -= 1
 
+
+def reset_comm_errors() -> None:
+    global comm_errors
+    with _comm_lock:
+        comm_errors = 0
 
 
 # utils +++++++++++++++++++++++++++++
@@ -77,7 +87,7 @@ def bytesval(data, scale=1.0, signd=False):
 def bbbstr(data):
     try:
         return ' '.join([format(byte, settings.data_hex_format) for byte in data])
-    except:
+    except (TypeError, ValueError):
         return data
 
 def arr2hexstr(data):
@@ -144,7 +154,7 @@ def vdatetime2str(data:bytes, fdowidx:int=1) -> str:
         dt = f"{data[3]:02x}.{data[2]:02x}.{data[0]:02x}{data[1]:02x}"
         tm = f"{data[5]:02x}:{data[6]:02x}:{data[7]:02x}"
         return f"{wkd} {dt} {tm}"
-    except:
+    except (IndexError, TypeError, ValueError):
         return "(conversion failed)"
 
 def utf82str(data:bytes) -> str:
@@ -246,7 +256,30 @@ def get_module_modified_datetime(module) -> datetime:
     try:
         module_path = Path(module.__file__).with_suffix(".py")
         return datetime.fromtimestamp(module_path.stat().st_mtime)
-    except:
+    except (AttributeError, TypeError, OSError, ValueError, OverflowError):
         return datetime.min
     
 
+
+
+def receive_raw_serial(eot_time: float, timeout: float, ser, ser2=None) -> tuple[int, bytearray]:
+    """Shared bounded raw receiver with monotonic deadlines."""
+    data = bytearray()
+    deadline = time.monotonic() + timeout
+    last_receive = time.monotonic()
+    while time.monotonic() < deadline:
+        try:
+            chunk = ser.read_all()
+            if chunk:
+                data.extend(chunk)
+                if len(data) > 8192:
+                    return 0xFD, data[:8192]
+                last_receive = time.monotonic()
+                if ser2 is not None:
+                    ser2.write(chunk)
+            elif data and time.monotonic() - last_receive >= eot_time:
+                return 1, data
+        except (serial.SerialException, OSError):
+            return 0xAA, data
+        time.sleep(0.005)
+    return 0xFF, data

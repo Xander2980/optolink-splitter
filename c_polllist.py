@@ -17,6 +17,7 @@
 import os
 import sys
 import importlib
+from typing import Any, Optional
 
 from c_settings_adapter import settings
 from logger_util import logger
@@ -36,7 +37,8 @@ class cPollList:
         self.datapoint_metadata = {}
 
 
-    def make_list(self, reload = False):
+    def make_list(self, reload: bool = False) -> bool:
+        previous = self.__dict__.copy()
         self.items = []
         self.cycle_groups = {}
         self.num_items = 0
@@ -63,7 +65,7 @@ class cPollList:
             # apply poll groups (if exists)
             foreign_groups = getattr(listmodule, "poll_groups", None)
             if foreign_groups is not None:
-                self.cycle_groups = foreign_groups
+                self.cycle_groups = dict(foreign_groups)
             # make 1-cycle group
             self.cycle_groups["*#1"] = 1
 
@@ -89,23 +91,29 @@ class cPollList:
                 # make tuple
                 new_tuple = tuple(new_item)
                 # append to poll items
+                if len(new_tuple) < 4 or not isinstance(new_tuple[1], str):
+                    raise ValueError(f"Invalid poll item: {new_tuple!r}")
                 self.items.append(new_tuple)
 
             self.num_items = len(self.items)
             self.module_date = utils.get_module_modified_datetime(listmodule)
 
-            # reset cache
-            self.datapoint_metadata = {}
+            self.build_index()
 
             # apply poll interval if given
             foreign_interval = getattr(listmodule, 'poll_interval', None)
             if foreign_interval is not None:
+                if type(foreign_interval) is not int or foreign_interval < -1:
+                    raise ValueError("poll_interval must be an integer >= -1")
                 settings.poll_interval = foreign_interval
 
             # infos
             logger.info(f"poll_list made, {self.num_items} items")
+            return True
         except Exception:
-            logger.exception(f"make_list")
+            self.__dict__.update(previous)
+            logger.exception("make_list")
+            return False
 
 
     def set_pollcycle(self, group_key:str, value) -> bool:
@@ -113,51 +121,31 @@ class cPollList:
             return False
         try:
             cyc = int(value)
-        except:
+        except (TypeError, ValueError):
             return False
         self.cycle_groups[group_key] = cyc
         return True
 
 
-    def find_datapoint_by_name(self, dpname):
-        """Find datapoint configuration by name in poll_list."""
-        if not self.items:
-            return None
-        
-        # Check cache first
-        if dpname in self.datapoint_metadata:
-            return self.datapoint_metadata[dpname]
-        
-        # Search in poll_list items
-        for lstidx in range(self.num_items):
-            # (PollCycleGroupKey, Name, DpAddr, Len, [bbFilter,] Scale/Type, Signed)
-            item = self.items[lstidx]   
+    def build_index(self) -> None:
+        index = {}
+        for idx, item in enumerate(self.items):
+            name, addr, length = item[1:4]
+            if name in index:
+                logger.warning(f"Duplicate poll datapoint name: {name}")
+                continue
+            bbfilter = item[4] if len(item) > 4 and isinstance(item[4], str) and item[4].lower().startswith("b:") else None
+            offset = 1 if bbfilter else 0
+            index[name] = {
+                "addr": addr, "len": length, "bbfilter": bbfilter,
+                "scale_type": item[4 + offset] if len(item) > 4 + offset else None,
+                "signed": item[5 + offset] if len(item) > 5 + offset else False,
+                "list_index": idx,
+            }
+        self.datapoint_metadata = index
 
-            name = item[1]
-            
-            if name == dpname:  #TODO case-insesitive?!
-                addr = item[2] #if len(item1) > 1 else None
-                dlen = item[3] #if len(item1) > 2 else 1
-                bbfilter = None
-                offset = 0
-                if len(item) > 4 and isinstance(item[4], str) and str(item[4]).startswith('b:'):
-                    # is bb-filter
-                    bbfilter = item[4]
-                    offset = 1
-                scale_type = item[4 + offset] if len(item) > 4 + offset else None
-                signed = item[5 + offset] if len(item) > 5 + offset else False
-                metadata = {
-                    'addr': addr,
-                    'len': dlen,
-                    'bbfilter': bbfilter,
-                    'scale_type': scale_type,
-                    'signed': signed,
-                    'list_index': lstidx
-                }
-                # cache it
-                self.datapoint_metadata[name] = metadata
-                return metadata
-        return None
+    def find_datapoint_by_name(self, dpname: str) -> Optional[dict[str, Any]]:
+        return self.datapoint_metadata.get(dpname)
 
 
 # === for global use ================

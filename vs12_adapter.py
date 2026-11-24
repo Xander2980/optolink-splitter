@@ -6,32 +6,33 @@ import viconn_util
 from c_settings_adapter import settings
 
 
-VS2 = not settings.vs1protocol
+def uses_vs2() -> bool:
+    return not settings.vs1protocol
 
 
 def init_protocol(ser:serial.Serial) -> bool:
-    if(VS2):
+    if uses_vs2():
         return optolinkvs2.init_vs2(ser)
     else:
         return optolinkvs1.init_protocol(ser)
 
 
 def read_datapoint_ext(addr:int, rdlen:int, ser:serial.Serial) -> tuple[int, int, bytearray]: 
-    if(VS2):
+    if uses_vs2():
         return optolinkvs2.read_datapoint_ext(addr, rdlen, ser)
     else:
         return optolinkvs1.read_datapoint_ext(addr, rdlen, ser)
 
 
 def write_datapoint_ext(addr:int, data:bytes, ser:serial.Serial) -> tuple[int, int, bytearray]:
-    if(VS2):
+    if uses_vs2():
         return optolinkvs2.write_datapoint_ext(addr, data, ser)
     else:
         return optolinkvs1.write_datapoint_ext(addr, data, ser)
 
 
 def do_request(ser:serial.Serial, fctcode:int, addr:int, rlen:int, data:bytes=b'', protid=0x00) -> tuple[int, int, bytearray]:
-    if(VS2):
+    if uses_vs2():
         return optolinkvs2.do_request(ser, fctcode, addr, rlen, data, protid)
     else:
         #return 0xAF, addr, bytearray()
@@ -86,26 +87,24 @@ def receive_telegr(resptelegr:bool, raw:bool, ser:serial.Serial, ser2:serial.Ser
     ----------
     Diese Funktion blockiert, bis das Telegramm vollstaendig empfangen oder ein Timeout erreicht wurde.
     """
-    if(VS2):
+    if uses_vs2():
         return optolinkvs2.receive_telegr(resptelegr, raw, ser, ser2, mqtt_publ_callback)
     else:
         return optolinkvs1.receive_telegr(resptelegr, raw, ser, ser2)
 
 
 def receive_fullraw(eot_time, timeout, ser:serial.Serial, ser2:serial.Serial=None) -> tuple[int, bytearray]:        # type: ignore
-    # same everywhere, only one to service
-    return optolinkvs2.receive_fullraw(eot_time, timeout, ser, ser2) 
-    # if(VS2):
-    #     return optolinkvs2.receive_fullraw(eot_time, timeout, ser, ser2) #, mqtt_publ_callback)
-    # else:
-    #     return optolinkvs1.receive_fullraw(eot_time, timeout, ser, ser2)
+    if uses_vs2():
+        return optolinkvs2.receive_fullraw(eot_time, timeout, ser, ser2)
+    return optolinkvs1.receive_fullraw(eot_time, timeout, ser, ser2)
+
 
 def reset_vs1sync():
     optolinkvs1.reset_sync()
 
 
 def wait_for_vicon(serVicon:serial.Serial, serOpto:serial.Serial, timeout:float) -> bool:
-    if(VS2):
+    if uses_vs2():
         return viconn_util.detect_vs2(serVicon, serOpto, timeout)
     else:
         return viconn_util.detect_vs1(serVicon, serOpto, timeout)
