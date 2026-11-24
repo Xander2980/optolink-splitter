@@ -10,7 +10,7 @@ interval = 0
 def read_energy(ser:serial.Serial, day_of_week=None):
     # read energy by RPC
     addr = 0xb800
-    wkday = day_of_week if day_of_week else datetime.datetime.now().weekday()
+    wkday = day_of_week if day_of_week is not None else datetime.datetime.now().weekday()
     outbuff = bytearray(10)
     outbuff[0] = 0x41   # 0x41 Telegrammstart
     outbuff[1] = 0x07   # Len Payload
@@ -41,7 +41,7 @@ def read_energy(ser:serial.Serial, day_of_week=None):
         # energy_heating_electric
         # energy_water_thermal
         # energy_water_electric
-        pre = f"{day_of_week}/" if day_of_week else ''
+        pre = f"{day_of_week}/" if day_of_week is not None else ''
         mqtt_util.publish_read(f"{pre}energy_heating_thermal", addr, utils.bytesval(data[12:14], 0.1))
         mqtt_util.publish_read(f"{pre}energy_heating_electric", addr, utils.bytesval(data[14:16], 0.1))
         mqtt_util.publish_read(f"{pre}energy_water_thermal", addr, utils.bytesval(data[16:18], 0.1))

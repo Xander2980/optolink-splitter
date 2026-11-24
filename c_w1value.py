@@ -10,8 +10,10 @@ class W1Value:
         self.maxignore = max_ignore
         self.ignored = 0
         self.inited = False
+        self.last_accepted = False
     
     def checked(self, newval):
+        self.last_accepted = True
         if self.maxchange <= 0.0:
             # e.g. non-scalar values
             return newval
@@ -19,12 +21,13 @@ class W1Value:
             if abs(self.value - newval) <= self.maxchange:
                 self.value = newval
                 self.ignored = 0
-            elif(self.ignored <= self.maxignore):
+            elif(self.ignored < self.maxignore):
                 # keep & return recent value
                 self.ignored += 1
+                self.last_accepted = False
             else:
                 self.value = newval
-                #self.ignored = 0
+                self.ignored = 0
         else:
             self.value = newval
             self.inited = True

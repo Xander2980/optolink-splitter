@@ -49,11 +49,19 @@ class MeasurementTracker:
         self.values: dict[str, Measurement] = {}
         self.dirty: set[str] = set()
         self.last_report: dict[str, float] = {}
+        self.active: set[str] = set()
 
     def configure(self, names) -> None:
         # Retain old names as invalid until the next flush, so removed sensors
         # do not remain online in the broker.
-        for name in set(self.values) | set(names):
+        self.active = set(names)
+        # Bound retired entries if the poll list is repeatedly replaced while offline.
+        retired = sorted(set(self.values) - self.active)
+        for name in retired[max(128, len(self.active)):]:
+            self.values.pop(name, None)
+            self.dirty.discard(name)
+            self.last_report.pop(name, None)
+        for name in set(self.values) | self.active:
             self.values.setdefault(name, Measurement()).invalidate()
             self.dirty.add(name)
         self.last_report.clear()
@@ -87,4 +95,8 @@ class MeasurementTracker:
 
     def mark_sent(self, name: str, now: float) -> None:
         self.dirty.discard(name)
-        self.last_report[name] = now
+        if name in self.active:
+            self.last_report[name] = now
+        else:
+            self.values.pop(name, None)
+            self.last_report.pop(name, None)

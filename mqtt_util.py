@@ -357,7 +357,17 @@ def handle_set_topic(topic: str, payload: bytes) -> Optional[tuple[str, str]]:
             logger.warning(f"Invalid /set topic format: {topic}")
             return
         
-        dpname = topic_parts[-2]
+        prefix = settings.mqtt_topic + "/"
+        if not topic.startswith(prefix):
+            return None
+        relative = topic[len(prefix):-4]
+        dpname = relative
+        datapoint_info = poll_list.find_datapoint_by_name(dpname)
+        if datapoint_info is None:
+            for name, info in poll_list.datapoint_metadata.items():
+                if settings.mqtt_fstr.format(dpname=name, dpaddr=info["addr"]) == relative:
+                    dpname, datapoint_info = name, info
+                    break
         value_str = utils.bstr2str(payload).strip()
         
         logger.debug(f"Received /set request: {dpname} = {value_str}")
@@ -367,7 +377,6 @@ def handle_set_topic(topic: str, payload: bytes) -> Optional[tuple[str, str]]:
             logger.warning(f"/set datapoint {dpname!r} not allowed")
             publish_response(f"/set {dpname} rejected: not writable")
             return
-        datapoint_info = poll_list.find_datapoint_by_name(dpname)
         if datapoint_info is None:
             logger.warning(f"/set Datapoint '{dpname}' not found in poll_list")
             return
@@ -394,7 +403,7 @@ def handle_set_topic(topic: str, payload: bytes) -> Optional[tuple[str, str]]:
         addr = datapoint_info['addr']
         length = datapoint_info['len']
         scale_type = datapoint_info.get('scale_type')
-        signed = datapoint_info.get('signed', False)
+        signed = utils.get_bool(datapoint_info.get('signed', False))
         
         # Convert value to bytes
         bytes_value, write_raw = convert_value_to_bytes(value_str, length, scale_type, signed)

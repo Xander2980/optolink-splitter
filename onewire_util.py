@@ -47,7 +47,7 @@ def read_ds18b20(device_file) -> tuple[int, float]:  # retcode, temp_°C
                         return 0x01, temp_c
                     else:
                         print("Err_w1_temp_reasonabe", temp_c, lines)
-        except:
+        except (OSError, IndexError, ValueError):
             pass
         time.sleep(0.2)
     return 0xFF, -99.999  # FF = timeout
@@ -66,7 +66,7 @@ def read_ds2423(device_file) -> tuple[int, list[int]]:  # retcode, counts
                         counts.append(count_value)
                 if len(counts) == 4:  # Stellen sicher, dass wir alle 4 Zaehlerwerte haben
                     return 0x01, counts
-        except:
+        except (OSError, IndexError, ValueError):
             pass
         time.sleep(0.2)
     return 0xFF, []  # FF = timeout
@@ -80,7 +80,7 @@ def read_w1sensor(sensor_id) -> tuple[int, any]:  # retcode, val/s
         return read_ds18b20(device_file)
     elif(sensinfo[1].lower() == 'ds2423'):
         return read_ds2423(device_file)
-    #elif() to be continued for other w1 sensors...
+    raise ValueError(f"Unsupported 1-Wire sensor type: {sensinfo[1]}")
 
 # util -----------
 def temp_reasonable(temp) -> bool:

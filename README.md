@@ -241,3 +241,20 @@ A compact and practical 3D-printable case designed for Raspberry Pi 2 & 3 includ
 This software is **not affiliated with, endorsed by, or associated with Viessmann** in any way. The terms Vitoconnect, Optolink, Vitocal, ViCare, etc. refer to Viessmann products and technologies. All product and brand names mentioned belong to their respective owners.<br>
 It is provided **as-is**, without any warranties or guarantees. The authors assume no liability for any issues arising from its use. 
 
+
+
+## Local Raspberry Pi robustness changes
+
+The local fork keeps the existing VS1/VS2, Vitoconnect, MQTT and TCP interfaces. No additional runtime services are required. Use a stable serial path such as `/dev/serial/by-id/...` for a USB adapter; do not automatically select another device when the configured adapter is missing.
+
+Optional settings in `settings_ini.py` (defaults in `settings_ini.py.example`):
+
+- `usb_reconnect_forever = True`: retry a disconnected serial adapter with capped exponential backoff; `restart_delay` and `restart_max_delay` control the delay.
+- `poll_read_retries = 1`: retry transient read errors only, never writes; 0..3.
+- `poll_stale_after = 0`: derive the freshness deadline from the configured polling interval and cycle group, or specify a positive number of seconds. Once-only datapoints do not expire by time but are invalidated on reconnect.
+- `set_write_allowlist = None`: preserve legacy access; use a set of explicitly writable datapoint names (or an empty set to disable /set). Use `cmnd_write_allowed = False` to disable generic raw writes and `write_limits` to constrain numeric values.
+- `tcp_legacy_idle = 0.1`: legacy unframed commands use an idle gap. Use `None` to require reliable newline/CR/NUL-delimited messages. TCP should be bound to a trusted interface.
+
+MQTT keeps the original data topics and combined `<base>/LWT`. The additional `<base>/status/optolink` reports protocol readiness while MQTT is connected; `stats` reports both connection states. Each polling datapoint publishes retained `<base>/quality/<name>` (online/offline) and `<base>/quality/<name>/last_success` (Unix timestamp or null). Re-run the existing Home Assistant discovery publisher for new per-datapoint availability on supported single-state entities. Existing discovery configurations remain usable. The combined LWT remains authoritative after a broker disconnect because MQTT permits only one Last Will per client.
+
+Hardware-free checks: `python -m compileall -q .` and `python -m unittest discover -s tests -v`. Validate the serial protocol and actual Raspberry Pi hardware before production deployment.

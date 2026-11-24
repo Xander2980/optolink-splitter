@@ -348,6 +348,7 @@ def publish_ha_discovery():
                 # explicit availability configuration.
                 dp_name = item[1] if isinstance(item, (tuple, list)) else item.get("name")
                 if (dp_name in poll_map and domain != "button"
+                        and not any(k.endswith("_state_topic") for k in discovery_config)
                         and "availability" not in discovery_config
                         and discovery_config.get("availability_topic") == f"{mqtt_base}/LWT"):
                     discovery_config.pop("availability_topic")

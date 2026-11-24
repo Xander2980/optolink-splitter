@@ -199,7 +199,10 @@ def response_to_request(request, serViDev) -> tuple[int, bytearray, Any, str]:  
             if(addr in settings.w1sensors):
                 # 1wire sensor
                 retcode, val = onewire_util.read_w1sensor(addr)
-                val = w1values[addr].checked(val)
+                if retcode == 1:
+                    val = w1values[addr].checked(val)
+                    if not w1values[addr].last_accepted:
+                        retcode = 0xFB
             else:
                 # Optolink item
                 retcode, addr, data = vs12_adapter.read_datapoint_ext(addr, int(parts[2]), serViDev)

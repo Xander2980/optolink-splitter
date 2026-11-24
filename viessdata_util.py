@@ -32,16 +32,9 @@ def get_filename() -> str:
 def get_headline() -> str:
     now = datetime.datetime.now()
     dt =  "{2:04d}-{1:02d}-{0:02d}".format(now.day, now.month, now.year)
-    cols = []
-    for itm in poll_list.items:
-        # get addr as column caption
-        if(isinstance(itm[0], int)):
-            if(itm[0] != 0):
-                # PollCycle...
-                cols.append(itm[2])
-        else:
-            cols.append(itm[1])
-    capts = ';'.join([format(addr, '04X') for addr in cols])
+    cols = [item[2] for item in poll_list.items
+            if poll_list.cycle_groups[item[0]] != 0]
+    capts = ';'.join(format(addr, '04X') for addr in cols)
     return f";{dt};{capts};"
 
 def minutes_since_monday_midnight() -> int:
@@ -88,7 +81,7 @@ def buffer_csv_line(data, force_write=False):
             item = poll_list.items[i]
             cycle = poll_list.cycle_groups[item[0]]
             if(cycle != 0):
-                sval = str(data[i]) if data[i] else "0"  # wg. None wg. once_onlies.... alles Pfusch
+                sval = "" if data[i] is None else str(data[i])  # missing is not zero
                 if(utils.to_number(data[i]) != None):
                     # format number, anything else left like it is
                     sval = sval.replace(tbreplaced, settings.dec_separator) 
@@ -117,6 +110,11 @@ def buffer_csv_line(data, force_write=False):
 
     if(sline is not None):
         wrbuffer.append(sline)
+    # Bound memory even when the CSV destination is unavailable for days.
+    limit = max(1000, settings.buffer_to_write * 10)
+    if len(wrbuffer) > limit:
+        logger.error("CSV backlog limit reached; discarding oldest rows")
+        del wrbuffer[:-limit]
 
 
 # main for test only

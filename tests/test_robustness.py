@@ -12,6 +12,8 @@ from c_polllist import cPollList
 from c_settings_adapter import SettingsAdapter, parse_broker
 from runtime_support import MeasurementTracker, reconnect_delay, freshness_deadline
 import utils
+import optolinkvs2_switch as switch
+from c_w1value import W1Value
 
 
 class TcpTests(unittest.TestCase):
@@ -147,10 +149,10 @@ class RuntimeTests(unittest.TestCase):
 class Vs1Tests(unittest.TestCase):
     def test_read_response_fragmented(self):
         ser = Mock()
-        ser.read_all.side_effect = [b"\\x01", b"\\x02"]
+        ser.read_all.side_effect = [bytes([1]), bytes([2])]
         with patch.object(optolinkvs1, "sync_elapsed", return_value=False), patch.object(utils, "comm_error"):
             code, addr, data = optolinkvs1.read_datapoint_ext(0x0804, 2, ser)
-        self.assertEqual((code, addr, data), (1, 0x0804, bytearray(b"\\x01\\x02")))
+        self.assertEqual((code, addr, data), (1, 0x0804, bytearray([1, 2])))
         ser.write.assert_called_once_with(bytearray([0xf7, 0x08, 0x04, 2]))
 
     def test_failed_sync_does_not_send_request(self):
@@ -159,6 +161,78 @@ class Vs1Tests(unittest.TestCase):
                 optolinkvs1, "re_init", return_value=False), patch.object(utils, "comm_error"):
             self.assertEqual(optolinkvs1.read_datapoint_ext(0x0804, 2, ser)[0], 0xFF)
         ser.write.assert_not_called()
+
+
+class IntegrationTests(unittest.TestCase):
+    def test_poll_retries_only_transient_reads(self):
+        fake_poll = cPollList()
+        fake_poll.items = [("g", "temperature", 0x0804, 2, 0.1)]
+        fake_poll.cycle_groups = {"g": 1}
+        fake_poll.num_items = 1
+        fake_poll.build_index()
+        poll_data = [None]
+        with patch.object(switch, "state", switch.RuntimeState()), patch.object(
+            switch, "poll_list", fake_poll
+        ), patch.object(switch.settings, "poll_read_retries", 1), patch.object(
+            switch.requests_util, "response_to_request",
+            side_effect=[(0xff, bytearray(), "?", ""), (1, bytearray([210, 0]), 21.0, "")]
+        ) as response, patch.object(switch, "olbreath"):
+            code = switch.do_poll_item(poll_data, Mock())
+            self.assertEqual(code, 1)
+            self.assertEqual(response.call_count, 2)
+            self.assertTrue(switch.state.measurements.values["temperature"].valid)
+            self.assertEqual(poll_data, [21.0])
+
+    def test_usb_reopens_after_removal(self):
+        fake_poll = cPollList()
+        fake_serial = Mock()
+        fake_serial.is_open = True
+        def init(_):
+            utils.shutdown_event.set()
+            return True
+        utils.shutdown_event.clear()
+        utils.restart_event.clear()
+        try:
+            with patch.object(switch, "state", switch.RuntimeState()), patch.object(
+                switch, "poll_list", fake_poll
+            ), patch.object(fake_poll, "make_list", return_value=True), patch.object(
+                switch.settings, "port_vitoconnect", None
+            ), patch.object(switch.settings, "mqtt_broker", None), patch.object(
+                switch.settings, "tcpip_port", None
+            ), patch.object(switch.settings, "usb_reconnect_forever", True), patch.object(
+                switch.settings, "max_restarts", 0
+            ), patch.object(switch.serial, "serial_for_url",
+                           side_effect=[serial.SerialException("USB removed"), fake_serial]
+            ) as open_serial, patch.object(switch.vs12_adapter, "init_protocol", side_effect=init), patch.object(
+                utils.shutdown_event, "wait", return_value=False
+            ), patch.object(switch.signal, "signal"):
+                switch.main()
+                self.assertEqual(open_serial.call_count, 2)
+                fake_serial.close.assert_called_once()
+        finally:
+            utils.shutdown_event.clear()
+            utils.restart_event.clear()
+
+    def test_mqtt_reconnect_invalidates_publish_cache(self):
+        client = Mock()
+        with patch.object(mqtt_util, "optolink_ready", True), patch.object(
+            mqtt_util.settings, "mqtt_topic", "Vito"
+        ):
+            mqtt_util.recent_posts["test"] = 42
+            before = mqtt_util.connection_generation
+            mqtt_util.on_connect(client, None, {}, 0, None)
+            self.assertEqual(mqtt_util.connection_generation, before + 1)
+            self.assertEqual(mqtt_util.recent_posts, {})
+            client.publish.assert_any_call("Vito/LWT", "online", qos=1, retain=True)
+
+    def test_onewire_outlier_is_not_fresh(self):
+        value = W1Value(1, max_change=10, max_ignore=2)
+        self.assertEqual(value.checked(20), 20)
+        self.assertEqual(value.checked(80), 20)
+        self.assertFalse(value.last_accepted)
+        self.assertEqual(value.checked(80), 20)
+        self.assertEqual(value.checked(80), 80)
+        self.assertTrue(value.last_accepted)
 
 
 if __name__ == "__main__":

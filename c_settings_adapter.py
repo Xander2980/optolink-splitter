@@ -135,7 +135,9 @@ class SettingsAdapter:
         if settings_module:
             try:
                 self._settings_obj = importlib.import_module(settings_module)
-            except Exception as e:
+            except ModuleNotFoundError as e:
+                if e.name != settings_module:
+                    raise
                 print(f"ERROR importing settings module: {e}")
                 return False
         
@@ -273,6 +275,11 @@ class SettingsAdapter:
             raise ValueError("Invalid port_vitoconnect")
         if self.mqtt_broker is not None:
             parse_broker(self.mqtt_broker)
+            if self.mqtt_fstr is not None:
+                try:
+                    self.mqtt_fstr.format(dpname='example', dpaddr=0x1234)
+                except (AttributeError, KeyError, IndexError, ValueError) as exc:
+                    raise ValueError("Invalid mqtt_fstr") from exc
             if not isinstance(self.mqtt_topic, str) or not self.mqtt_topic or any(c in self.mqtt_topic for c in "#+\0"):
                 raise ValueError("Invalid MQTT topic")
         if (self.mqtt_tls_certfile is None) != (self.mqtt_tls_keyfile is None):

@@ -66,6 +66,8 @@ class cPollList:
             foreign_groups = getattr(listmodule, "poll_groups", None)
             if foreign_groups is not None:
                 self.cycle_groups = dict(foreign_groups)
+            if any(type(cycle) is not int for cycle in self.cycle_groups.values()):
+                raise ValueError("poll group cycles must be integers")
             # make 1-cycle group
             self.cycle_groups["*#1"] = 1
 
@@ -91,7 +93,9 @@ class cPollList:
                 # make tuple
                 new_tuple = tuple(new_item)
                 # append to poll items
-                if len(new_tuple) < 4 or not isinstance(new_tuple[1], str):
+                if (len(new_tuple) < 4 or not isinstance(new_tuple[1], str) or not new_tuple[1]
+                        or type(new_tuple[2]) is not int or not 0 <= new_tuple[2] <= 0xFFFF
+                        or type(new_tuple[3]) is not int or not 1 <= new_tuple[3] <= 255):
                     raise ValueError(f"Invalid poll item: {new_tuple!r}")
                 self.items.append(new_tuple)
 

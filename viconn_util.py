@@ -40,7 +40,7 @@ def detect_vs2(serVicon:serial.Serial, serOpto:serial.Serial, timeout:float) -> 
 
     viconnlog.do_log("detect_vs2...")
 
-    while True:
+    while not utils.shutdown_event.is_set():
         # Lesen von Daten von beiden seriellen Schnittstellen
         dataVicon = serVicon.read()
         dataOpto = serOpto.read()
@@ -72,6 +72,7 @@ def detect_vs2(serVicon:serial.Serial, serOpto:serial.Serial, timeout:float) -> 
         time.sleep(0.001)
         if(time.monotonic() > timestart + timeout):
             return False
+    return False
 
 
 def detect_vs1(serVicon:serial.Serial, serOpto:serial.Serial, timeout:float) -> bool:
@@ -80,7 +81,7 @@ def detect_vs1(serVicon:serial.Serial, serOpto:serial.Serial, timeout:float) -> 
     timestart = time.monotonic()
     expctdlen = -1
 
-    while True:
+    while not utils.shutdown_event.is_set():
         # Lesen von Daten von beiden seriellen Schnittstellen
         dataVicon = serVicon.read()
         dataOpto = serOpto.read()
@@ -118,6 +119,7 @@ def detect_vs1(serVicon:serial.Serial, serOpto:serial.Serial, timeout:float) -> 
         time.sleep(0.001)
         if(time.monotonic() > timestart + timeout):
             return False
+    return False
 
 
 # Bound queued master requests and avoid a producer/consumer race.
@@ -152,6 +154,10 @@ def listen_to_Vitoconnect(servicon: serial.Serial, pubcallback=None) -> None:
         else:
             viconnlog.do_log(data, f"X {retcode:02x}")
             raise RuntimeError(f"Error {retcode:02x} receiving Vitoconnect request")
+
+
+def has_pending_requests() -> bool:
+    return not _vicon_requests.empty()
 
 
 def get_vicon_request() -> bytearray:
