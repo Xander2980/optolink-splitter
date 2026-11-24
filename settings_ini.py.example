@@ -41,6 +41,7 @@ mqtt_no_redundant = False       # if True, no previously published unchanged mes
 
 # TCP/IP ++++++++++++++++++++++++++
 tcpip_port = 65234              # TCP/IP port for communication (default: 65234, used by Viessdata; set None to disable TCP/IP)
+tcp_legacy_idle = 0.1          # None requires newline/NUL framing; legacy idle gap in seconds
 tcpip_host = "0.0.0.0"          # interface for TCP/IP, e.g. "127.0.0.1" for local only (haus-fixes)
 
 # Optolink Communication Timing ++++
@@ -76,6 +77,7 @@ max_comm_errors = 10            # optolink comm error threshold to init restart
 retry_counters_reset = 30       # minutes of sucessful operation to reset the retry counters 
 readback_delay_set = 1          # seconds delay between wirte via /set and reading back 
 cmnd_write_allowed = True       # False: write/writeraw/raw/request/fullraw via MQTT cmnd topic and TCP rejected; /set stays possible (haus-fixes)
+set_write_allowlist = None     # None preserves legacy /set access; use a set of allowed names or set() to disable
 write_limits = {}               # optional /set range per datapoint, e.g. {"neigung_hk1": (0.2, 3.5), "raumsoll_normal_hk1": (10, 25)} (haus-fixes)
 
 

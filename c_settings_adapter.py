@@ -64,10 +64,12 @@ class SettingsAdapter:
 
         # Write protection (haus-fixes) +++
         self.cmnd_write_allowed = True          # False: MQTT/TCP commands write/writeraw/raw/request/fullraw are rejected (only reads allowed; /set stays possible)
+        self.set_write_allowlist = None        # None: legacy; empty collection: disable /set
         self.write_limits = {}                  # optional per datapoint name: {'neigung_hk1': (0.2, 3.5), ...} – /set values outside are rejected
 
         # TCP/IP ++++++++++++++++++++++++++
         self.tcpip_port =  65234                # TCP/IP port for communication (default: 65234, used by Viessdata; set None to disable TCP/IP)
+        self.tcp_legacy_idle = 0.1             # None requires newline/NUL framing
         self.tcpip_host = "0.0.0.0"             # interface to bind, e.g. "127.0.0.1" for local only (haus-fixes)
         self.tcp_verbose = False                # TCP verbose logging if True
 
@@ -181,10 +183,12 @@ class SettingsAdapter:
 
         # Write protection (haus-fixes) +++
         self.cmnd_write_allowed = getattr(self._settings_obj, 'cmnd_write_allowed', self.cmnd_write_allowed)
+        self.set_write_allowlist = getattr(self._settings_obj, 'set_write_allowlist', self.set_write_allowlist)
         self.write_limits = getattr(self._settings_obj, 'write_limits', self.write_limits)
 
         # TCP/IP ++++++++++++++++++++++++++
         self.tcpip_port = getattr(self._settings_obj, 'tcpip_port', self.tcpip_port)
+        self.tcp_legacy_idle = getattr(self._settings_obj, 'tcp_legacy_idle', self.tcp_legacy_idle)
         self.tcpip_host = getattr(self._settings_obj, 'tcpip_host', self.tcpip_host)
         self.tcp_verbose = getattr(self._settings_obj, 'tcp_verbose', self.tcp_verbose)
 

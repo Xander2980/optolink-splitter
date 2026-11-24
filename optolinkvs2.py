@@ -96,7 +96,7 @@ def read_datapoint_ext(addr:int, rdlen:int, ser:serial.Serial) -> tuple[int, int
     #print("R tx", utils.bbbstr(outbuff))
 
     # return retcode, addr, data
-    retcode, raddr, data = receive_telegr(True, False, ser)
+    retcode, raddr, data = receive_telegr(True, False, ser, expected_function=1, expected_address=addr, expected_length=rdlen)
     # haus-fixes: Antwort muss zur Anfrage passen (verspaetete Antworten nicht falsch zuordnen) – upstream #258
     if (retcode == 0x01) and ((raddr != addr) or (len(data) != rdlen)):
         logger.error(f"VS2 response mismatch: requested {addr:04X}/{rdlen}, got {raddr:04X}/{len(data)}")
@@ -128,7 +128,7 @@ def write_datapoint_ext(addr:int, data:bytes, ser:serial.Serial) -> tuple[int, i
     #print("W tx", utils.bbbstr(outbuff))
 
     # return retcode, addr, data
-    retcode, raddr, rdata = receive_telegr(True, False, ser)
+    retcode, raddr, rdata = receive_telegr(True, False, ser, expected_function=2, expected_address=addr)
     # haus-fixes: Write-Antwort muss zur angefragten Adresse gehoeren – upstream #258
     if (retcode == 0x01) and (raddr != addr):
         logger.error(f"VS2 write response mismatch: requested {addr:04X}, got {raddr:04X}")
@@ -159,7 +159,7 @@ def do_request(ser:serial.Serial, fctcode:int, addr:int, rlen:int, data:bytes=b'
     return receive_telegr(True, False, ser)
 
 
-def receive_telegr(resptelegr:bool, raw:bool, ser:serial.Serial, ser2:serial.Serial=None, mqtt_publ_callback=None) -> tuple[int, int, bytearray]:       # type: ignore
+def receive_telegr(resptelegr:bool, raw:bool, ser:serial.Serial, ser2:serial.Serial=None, mqtt_publ_callback=None, *, expected_function=None, expected_address=None, expected_length=None) -> tuple[int, int, bytearray]:       # type: ignore
     """
     Empfaengt ein VS2-Telegramm.
 
@@ -221,7 +221,8 @@ def receive_telegr(resptelegr:bool, raw:bool, ser:serial.Serial, ser2:serial.Ser
     dlen = -1
 
     # for up 30x100ms serial data is read. (we do 600x5ms)
-    for _ in range(600):
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
         time.sleep(0.005)
         try:
             inbytes = ser.read_all()
@@ -315,6 +316,14 @@ def receive_telegr(resptelegr:bool, raw:bool, ser:serial.Serial, ser2:serial.Ser
                         if(raw): retdata = alldata
                         utils.comm_error(False)
                         return 0x03, addr, retdata
+                    if expected_function is not None and (
+                        (msgid & 0x0F) != 1 or fctcd != expected_function
+                        or addr != expected_address
+                        or (expected_length is not None and (dlen != expected_length or len(retdata) != expected_length))
+                    ):
+                        logger.error("VS2 response does not match request")
+                        utils.comm_error(True)
+                        return 0xFC, addr, retdata
                     #success
                     if(mqtt_publ_callback):
                         mqtt_publ_callback(0x01, addr, retdata, msgid, msqn, fctcd, dlen)

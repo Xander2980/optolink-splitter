@@ -349,7 +349,15 @@ def publish_ha_discovery():
                 if args.console:
                     print(f"{'-'*80}\n{topic}\n{json.dumps(discovery_config, indent=2)}")
                 else:
-                    mqtt_client.publish(topic, json.dumps(discovery_config), retain=True)
+                    info = mqtt_client.publish(topic, json.dumps(discovery_config), qos=1, retain=True)
+                    try:
+                        info.wait_for_publish(timeout=5)
+                        if not info.is_published():
+                            raise RuntimeError("publish acknowledgement timeout")
+                    except (RuntimeError, ValueError) as exc:
+                        print(f"ERROR publishing {topic}: {exc}")
+                        total_skipped += 1
+                        continue
                 print(f"Published {domain}: {discovery_config['name']} -> {discovery_config['unique_id']}")
                 total_published += 1
                 time.sleep(mqtt_delay)

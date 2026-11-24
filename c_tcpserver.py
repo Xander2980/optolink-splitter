@@ -1,4 +1,5 @@
 import socket
+from queue import Queue, Empty, Full
 
 from logger_util import logger
 import utils
@@ -7,7 +8,7 @@ import utils
 #logger = logging.getLogger("tcptest.txt")
 
 class TcpServer:
-    def __init__(self, host: str, port: int, verbose: bool = False):
+    def __init__(self, host: str, port: int, verbose: bool = False, legacy_idle: float = 0.1):
         self.host = host
         self.port = port
         self.verbose = verbose
@@ -18,7 +19,8 @@ class TcpServer:
         self.client_socket = None
         self.client_address = None
 
-        self.received_data = ""
+        self.requests = Queue(maxsize=128)
+        self.legacy_idle = legacy_idle
         self.exit_flag = False
 
     # ---------------------------------------------------------
@@ -26,7 +28,7 @@ class TcpServer:
     # ---------------------------------------------------------
     def run(self):
         self.exit_flag = False
-        self.received_data = ""
+        self.requests = Queue(maxsize=128)
 
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
@@ -80,57 +82,41 @@ class TcpServer:
     # ---------------------------------------------------------
     # Empfangen (Endlosschleife)
     # ---------------------------------------------------------
+    def _enqueue(self, data):
+        msg = data.decode("utf-8").strip().replace('"', "").replace("'", "")
+        if msg:
+            self.requests.put_nowait(msg)
+
     def _listen(self):
         if not self.client_socket or self.exit_flag:
             return
-        
-        self.client_socket.settimeout(0.5)
-
-        while self.client_socket and not self.exit_flag:
-            try:
-                data = self.client_socket.recv(1024)
-
-                if not data:
-                    logger.info("TCP Connection ended (FIN)")
+        sock = self.client_socket
+        sock.settimeout(self.legacy_idle if self.legacy_idle is not None else 0.5)
+        buffer = bytearray()
+        try:
+            while not self.exit_flag:
+                try:
+                    chunk = sock.recv(4096)
+                except socket.timeout:
+                    # Compatibility for old clients which send no delimiter.
+                    # Set legacy_idle=None for reliable newline/NUL framing.
+                    if buffer and self.legacy_idle is not None:
+                        self._enqueue(buffer)
+                        buffer.clear()
+                    continue
+                if not chunk:
                     break
-
-                if self.verbose:
-                    logger.info(f"TCP recd: {utils.bbbstr(data)}")
-
-                msg = (
-                    data.decode("utf-8")
-                    .strip()
-                    .replace("\0", "")
-                    .replace("\r", "")
-                    .replace("\n", "")
-                    .replace('"', "")
-                    .replace("'", "")
-                )
-
-                if msg:
-                    if self.verbose:
-                        logger.info(f"TCP recd: {msg}")
-
-                    m = msg.lower()
-
-                    if(self.command_callback) and self.command_callback(m,2):
-                        if self.verbose:
-                            logger.info("command_callback performed")
-                        pass
-                    else:
-                        self.received_data = msg
-
-            except socket.timeout:
-                # keine Daten → einfach exit_flag erneut pruefen
-                continue
-
-            except ConnectionError:
-                logger.warning("TCP Connection lost")
-                break
-
-            except Exception:
-                logger.exception("_listen")
-                break
+                buffer.extend(chunk.replace(b"\x00", b"\n"))
+                while b"\n" in buffer:
+                    frame, _, remainder = buffer.partition(b"\n")
+                    if len(frame) > 8192:
+                        raise ValueError("TCP frame too long")
+                    buffer = bytearray(remainder)
+                    self._enqueue(frame)
+                if len(buffer) > 8192:
+                    raise ValueError("TCP frame too long")
+        except (OSError, UnicodeError, ValueError, Full) as exc:
+            logger.warning(f"TCP session closed: {exc}")
 
     # ---------------------------------------------------------
     # Sendet Antwort an den Client
@@ -142,7 +128,7 @@ class TcpServer:
             data = data.encode("utf-8") + b"\n"
 
         try:
-            self.client_socket.send(data)
+            self.client_socket.sendall(data)
             if self.verbose:
                 logger.info(f"TCP sent: {utils.bbbstr(data)}")
         except Exception as e:
@@ -152,9 +138,10 @@ class TcpServer:
     # Holt gespeicherte Nachricht
     # ---------------------------------------------------------
     def get_request(self) -> str:
-        msg = self.received_data
-        self.received_data = ""
-        return msg
+        try:
+            return self.requests.get_nowait() if not self.exit_flag else ""
+        except Empty:
+            return ""
 
     # ---------------------------------------------------------
     # Schliesst alles

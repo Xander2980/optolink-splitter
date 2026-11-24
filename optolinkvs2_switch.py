@@ -201,7 +201,7 @@ def vicon_thread_func(serViCon, serViDev):
 def tcp_connection_loop():
     global tcp_server
     while(not progr_exit_flag):
-        tcp_server = c_tcpserver.TcpServer(settings.tcpip_host, settings.tcpip_port, settings.tcp_verbose)   # haus-fixes: Host einstellbar
+        tcp_server = c_tcpserver.TcpServer(settings.tcpip_host, settings.tcpip_port, settings.tcp_verbose, settings.tcp_legacy_idle)   # haus-fixes: Host einstellbar
         tcp_server.command_callback = do_special_command        # type: ignore
         tcp_server.run()
         tcp_server = None
@@ -529,6 +529,7 @@ def main():
                     bytesize=serial.EIGHTBITS,
                     exclusive=True,
                     timeout=0,
+                    write_timeout=3,
                 )
 
                 if settings.log_optolink:
@@ -558,7 +559,7 @@ def main():
                             stopbits=serial.STOPBITS_TWO,
                             bytesize=serial.EIGHTBITS,
                             exclusive=True,
-                            timeout=0)
+                            timeout=0, write_timeout=3)
                 # open went fine
                 logger.info(f"Vitoconnect serial port opened on {settings.port_vitoconnect}")
 
@@ -683,6 +684,8 @@ def main():
                                     mod_mqtt.lst_force_refresh = []     # type: ignore
                             # reload poll list, including onceonlies
                             if reload_poll_flag:
+                                if mod_mqtt:
+                                    mod_mqtt.clear_pending_requests()
                                 poll_list.make_list(reload=True)
                                 if(len(poll_data) != poll_list.num_items):          # type: ignore
                                     poll_data = [None] * poll_list.num_items
@@ -737,11 +740,13 @@ def main():
                     # MQTT request --------
                     elif(is_on == 1):
                         if(mod_mqtt is not None):
-                            msg = mod_mqtt.get_mqtt_request()
+                            msg, readback = mod_mqtt.get_mqtt_request()
                             if(msg):
                                 try:
                                     retcode, _, _, resp = requests_util.response_to_request(msg, serOptolink)
                                     mod_mqtt.publish_response(resp)
+                                    if retcode == 1 and readback is not None:
+                                        mod_mqtt.force_delayed(readback, settings.readback_delay_set)
                                 except Exception as e:
                                     mod_mqtt.publish_response(f"Error: {e}")
                                     logger.warning(f"Error handling MQTT request {msg}: {e}")
@@ -750,20 +755,24 @@ def main():
                     # TCP/IP request --------
                     elif(is_on == 2):
                         if(tcp_server is not None):
-                            msg = tcp_server.get_request()
+                            session = tcp_server
+                            msg = session.get_request()
                             if(msg):
                                 #print(f"recd tcp msg: {msg}")  #temp
                                 try:
-                                    if (not settings.cmnd_write_allowed) and requests_util.is_write_command(msg):
+                                    if session.command_callback and session.command_callback(msg.lower(), 2):
+                                        pass
+                                    elif (not settings.cmnd_write_allowed) and requests_util.is_write_command(msg):
                                         # haus-fixes: Schreibbefehle per TCP gesperrt
                                         logger.warning(f"TCP write command rejected (cmnd_write_allowed=False): {msg}")
-                                        tcp_server.send("write commands disabled")
+                                        session.send("write commands disabled")
                                     else:
                                         retcode, _, _, resp = requests_util.response_to_request(msg, serOptolink)
                                         #print(f"retcode {retcode}, try to send tcp: {resp}")  #temp
-                                        tcp_server.send(resp)
+                                        session.send(resp)
                                 except Exception as e:
                                     logger.warning(f"Error handling TCP request {msg}: {e}")
+                                    session.send(f"Error: {e}")
                                 did_secodary_request = True
         
                     #print(f"{((tnow := int(time.time()*10000)) - tprev)} ds {did_secodary_request}"); tprev = tnow
@@ -805,7 +814,7 @@ def main():
                 return
             else:
                 logger.info(f"waiting {settings.restart_delay}s before re-start...")
-                time.sleep(settings.restart_delay)
+                utils.shutdown_event.wait(settings.restart_delay)
                 #utils.shutdown_event.wait(settings.restart_delay)
 
 

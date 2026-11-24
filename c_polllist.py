@@ -41,6 +41,7 @@ class cPollList:
         self.cycle_groups = {}
         self.num_items = 0
         self.module_date = "0"
+        self.datapoint_metadata = {}
         try:
             # import module where poll list is taken from
             if(os.path.isfile("poll_list.py")):
@@ -139,7 +140,7 @@ class cPollList:
                 dlen = item[3] #if len(item1) > 2 else 1
                 bbfilter = None
                 offset = 0
-                if isinstance(item[4], str) and str(item[4]).startswith('b:'):
+                if len(item) > 4 and isinstance(item[4], str) and str(item[4]).startswith('b:'):
                     # is bb-filter
                     bbfilter = item[4]
                     offset = 1

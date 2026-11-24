@@ -15,7 +15,8 @@
 '''
 
 import time
-import threading
+from queue import Queue, Empty, Full
+import math
 import paho.mqtt.client as paho
 
 from c_settings_adapter import settings
@@ -29,8 +30,7 @@ import requests_util   # haus-fixes: is_write_command()
 verbose = False
 
 mqtt_client = None
-cmnd_queue = []   # command queue to serialize bus traffic
-publ_queue = []   # stuff to get published
+cmnd_queue = Queue(maxsize=128)  # (command, optional readback name)
 
 recent_posts = {}
 _sentinel = object()  # eindeutiger Wert fuer "nicht vorhanden"
@@ -61,12 +61,18 @@ def on_connect(client, userdata, flags, reason_code, properties):
 def on_disconnect(client, userdata, flags, reason_code, properties):
     if reason_code != 0:
         logger.warning('mqtt broker disconnected. reason_code = ' + str(reason_code))
-    client.publish(settings.mqtt_topic + "/LWT" , "offline", qos=0,  retain=True)
+    # Broker publishes the configured Last Will on unexpected disconnect.
 
 def on_message(client, userdata, msg):
     logger.debug(f"MQTT recd: {msg.topic}, {msg.payload}")
     if(settings.mqtt_listen is None):
         logger.warning(f"MQTT recd: Topic = {msg.topic}, Payload = {msg.payload}")  # ErrMsg oder so?
+        return
+    if msg.retain:
+        logger.warning(f"Ignoring retained MQTT command on {msg.topic}")
+        return
+    if len(msg.payload) > 8192:
+        logger.warning("MQTT command too long")
         return
     topic = str(msg.topic)            # Topic in String umwandeln
     
@@ -83,7 +89,7 @@ def on_message(client, userdata, msg):
             logger.warning(f"MQTT write command rejected (cmnd_write_allowed=False): {rec}")
             publish_response("write commands disabled")
         else:
-            cmnd_queue.append(rec)
+            enqueue_request(rec)
     else:
         # Ausgabe anderer eingehenden MQTT-Nachrichten
         logger.warning(f"MQTT recd: Topic = {msg.topic}, Payload = {msg.payload}")
@@ -160,10 +166,30 @@ def connect_mqtt():
     #    raise Exception("Error connecting MQTT: " + str(e))
 
 
-def get_mqtt_request() -> str:
-    if cmnd_queue:
-        return cmnd_queue.pop(0)
-    return ""
+def enqueue_request(command, readback=None):
+    try:
+        cmnd_queue.put_nowait((command, readback))
+        return True
+    except Full:
+        logger.warning("MQTT command queue full")
+        publish_response("command queue full")
+        return False
+
+
+def get_mqtt_request():
+    try:
+        return cmnd_queue.get_nowait()
+    except Empty:
+        return "", None
+
+
+def clear_pending_requests():
+    while True:
+        try:
+            cmnd_queue.get_nowait()
+        except Empty:
+            break
+    lst_force_refresh.clear()
 
 
 def publish_read(name, addr, value):
@@ -182,28 +208,44 @@ def publish_response(resp:str):
 
 
 def publish_smart(topic, value, qos=0, retain=False):
-    if mqtt_client:
-        if(settings.mqtt_no_redundant):
-            # Publish only if the value changed
-            last = recent_posts.get(topic, _sentinel)
-            if last == value:
-                return
-            recent_posts[topic] = value
-        ret = mqtt_client.publish(topic, value, qos=qos, retain=retain)
-        if(verbose): print(ret)
+    client = mqtt_client
+    if client is None or not client.is_connected():
+        return
+    # Keep the cache object local so a reconnect cannot repopulate a new cache
+    # with an entry from an earlier MQTT session.
+    cache = recent_posts
+    if settings.mqtt_no_redundant and cache.get(topic, _sentinel) == value:
+        return
+    result = client.publish(topic, value, qos=qos, retain=retain)
+    if result.rc == paho.MQTT_ERR_SUCCESS and settings.mqtt_no_redundant:
+        cache[topic] = value
+    elif result.rc != paho.MQTT_ERR_SUCCESS:
+        logger.warning(f"MQTT publish failed on {topic}: {result.rc}")
+    return result
 
 
 def reset_recent_list():
-    recent_posts.clear()
-
+    global recent_posts
+    recent_posts = {}
 
 
 def exit_mqtt():
-    if mqtt_client:
-        logger.info("disconnect MQTT client")
-        if(mqtt_client.is_connected()):
-            mqtt_client.publish(settings.mqtt_topic + "/LWT" , "offline", qos=0,  retain=True)
-        mqtt_client.disconnect()
+    global mqtt_client
+    client = mqtt_client
+    if client is None:
+        return
+    try:
+        if client.is_connected():
+            info = client.publish(settings.mqtt_topic + "/LWT", "offline", qos=1, retain=True)
+            try:
+                info.wait_for_publish(timeout=2)
+            except (RuntimeError, ValueError):
+                logger.warning("MQTT offline publish not confirmed")
+        client.disconnect()
+    finally:
+        client.loop_stop()
+        mqtt_client = None
+        clear_pending_requests()
 
 
 ######################################################
@@ -221,20 +263,25 @@ lst_force_refresh = []
 
 
 def is_forced():
-    if lst_force_refresh:
-        return lst_force_refresh.pop(0)
+    now = time.monotonic()
+    for i, (deadline, name) in enumerate(lst_force_refresh):
+        if deadline <= now:
+            lst_force_refresh.pop(i)
+            info = poll_list.find_datapoint_by_name(name)
+            if info is not None:
+                return info["list_index"]
+            break
     return None
 
 
-def force_delayed(listidx, delay=1):
-    # im Zweifesfalle koennen 4-5 Comm cycles dazwischen liegen
-    def worker():
-        time.sleep(delay)
-        lst_force_refresh.append(listidx)
-
-    t = threading.Thread(target=worker, daemon=True)
-    t.start()
-    return t  # optional
+def force_delayed(name, delay=1):
+    # Only the serial worker schedules and consumes readbacks.
+    # Coalesce repeated writes to the same datapoint; no thread per write.
+    lst_force_refresh[:] = [(due, dp) for due, dp in lst_force_refresh if dp != name]
+    if len(lst_force_refresh) >= 128:
+        logger.warning("Readback queue full")
+        return
+    lst_force_refresh.append((time.monotonic() + max(0, delay), name))
 
 
 def handle_set_topic(topic, payload):
@@ -256,6 +303,11 @@ def handle_set_topic(topic, payload):
         
         logger.debug(f"Received /set request: {dpname} = {value_str}")
         
+        allowed = settings.set_write_allowlist
+        if allowed is not None and dpname not in allowed:
+            logger.warning(f"/set datapoint {dpname!r} not allowed")
+            publish_response(f"/set {dpname} rejected: not writable")
+            return
         datapoint_info = poll_list.find_datapoint_by_name(dpname)
         if datapoint_info is None:
             logger.warning(f"/set Datapoint '{dpname}' not found in poll_list")
@@ -274,7 +326,7 @@ def handle_set_topic(topic, payload):
                 logger.warning(f"/set '{dpname}': value '{value_str}' not numeric, rejected (write_limits)")
                 return
             lo, hi = limits
-            if (lo is not None and fval < lo) or (hi is not None and fval > hi):
+            if not math.isfinite(fval) or (lo is not None and fval < lo) or (hi is not None and fval > hi):
                 logger.warning(f"/set '{dpname}': value {fval} outside {limits}, rejected")
                 publish_response(f"/set {dpname}={value_str} rejected: outside {limits}")
                 return
@@ -284,7 +336,6 @@ def handle_set_topic(topic, payload):
         length = datapoint_info['len']
         scale_type = datapoint_info.get('scale_type')
         signed = datapoint_info.get('signed', False)
-        list_index = datapoint_info['list_index']
         
         # Convert value to bytes
         bytes_value, write_raw = convert_value_to_bytes(value_str, length, scale_type, signed)
@@ -301,10 +352,7 @@ def handle_set_topic(topic, payload):
             write_cmd = f"write;{addr:#x};{length};{int_value}"
         
         logger.debug(f"Generated write command: {write_cmd}")
-        cmnd_queue.append(write_cmd)
-
-        # Ensure the affected datapoint will be refreshed quite soon
-        force_delayed(list_index, settings.readback_delay_set)
+        enqueue_request(write_cmd, dpname)
 
     except: #Exception as e:
         logger.exception(f"handle_set_topic {topic}, {payload}")
