@@ -8,7 +8,7 @@ import utils
 #logger = logging.getLogger("tcptest.txt")
 
 class TcpServer:
-    def __init__(self, host: str, port: int, verbose: bool = False, legacy_idle: float = 0.1):
+    def __init__(self, host: str, port: int, verbose: bool = False, legacy_idle: float | None = 0.1):
         self.host = host
         self.port = port
         self.verbose = verbose
@@ -20,6 +20,8 @@ class TcpServer:
         self.client_address = None
 
         self.requests = Queue(maxsize=128)
+        if legacy_idle is not None and legacy_idle <= 0:
+            raise ValueError("legacy_idle must be positive or None")
         self.legacy_idle = legacy_idle
         self.exit_flag = False
 
@@ -27,37 +29,25 @@ class TcpServer:
     # Startet den Server
     # ---------------------------------------------------------
     def run(self):
-        self.exit_flag = False
+        if self.exit_flag:
+            return
         self.requests = Queue(maxsize=128)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket = sock
+        try:
+            if self.exit_flag:
+                return
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((self.host, self.port))
+            sock.listen(1)
+            logger.info(f"TCP Server listening on {self.host}:{self.port}")
+            self._wait_for_client()
+            sock.close()
+            self.server_socket = None
+            self._listen()
+        finally:
+            self.stop()
 
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-        # Sofortige Port-Wiederverwendung
-        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
-        # Binden + Listen
-        self.server_socket.bind((self.host, self.port))
-        self.server_socket.listen(1)
-
-        logger.info(f"TCP Server listening on {self.host}:{self.port}")
-        #print(f"TCP Server listening on {self.host}:{self.port}")
-
-        # warten auf Client
-        self._wait_for_client()
-
-        if not self.server_socket: return
-
-        # Server-Socket nicht mehr noetig
-        self.server_socket.close()
-        self.server_socket = None
-
-        # empfangen, bis exit oder FIN
-        self._listen()
-
-        # Nach Empfang -> alles schliessen
-        self.stop()
-
-    
     # ---------------------------------------------------------
     # auf Verbindung warten (Endlosschleife)
     # ---------------------------------------------------------
@@ -106,7 +96,7 @@ class TcpServer:
                     continue
                 if not chunk:
                     break
-                buffer.extend(chunk.replace(b"\x00", b"\n"))
+                buffer.extend(chunk.replace(b"\x00", b"\n").replace(b"\r", b"\n"))
                 while b"\n" in buffer:
                     frame, _, remainder = buffer.partition(b"\n")
                     if len(frame) > 8192:
@@ -147,9 +137,6 @@ class TcpServer:
     # Schliesst alles
     # ---------------------------------------------------------
     def stop(self):
-        if self.exit_flag: 
-            return
-
         logger.info("closing TCP Server")
 
         self.exit_flag = True

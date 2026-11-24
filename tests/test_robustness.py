@@ -18,6 +18,17 @@ class TcpTests(unittest.TestCase):
         self.assertEqual(server.get_request(), "read;0x0805;1")
         self.assertEqual(server.get_request(), "")
 
+    def test_legacy_idle_can_be_disabled(self):
+        import socket
+        server = c_tcpserver.TcpServer("localhost", 0, legacy_idle=None)
+        server.client_socket = Mock()
+        server.client_socket.recv.side_effect = [
+            b"read;0x", socket.timeout(), b"0804;1\r\n", b""
+        ]
+        server._listen()
+        self.assertEqual(server.get_request(), "read;0x0804;1")
+        self.assertEqual(server.get_request(), "")
+
     def test_sendall(self):
         server = c_tcpserver.TcpServer("localhost", 0)
         server.client_socket = Mock()
@@ -51,6 +62,20 @@ class MqttTests(unittest.TestCase):
             mqtt_util.publish_smart("test", 42)
             mqtt_util.publish_smart("test", 42)
         self.assertEqual(client.publish.call_count, 2)
+
+    def test_allowlist_denies_unlisted_datapoint(self):
+        with patch.object(mqtt_util.settings, "set_write_allowlist", set()), patch.object(
+            mqtt_util.poll_list, "find_datapoint_by_name"
+        ) as lookup:
+            self.assertIsNone(mqtt_util.handle_set_topic("Vito/test/set", b"20"))
+            lookup.assert_not_called()
+
+    def test_commands_are_processed_in_fifo_order(self):
+        with patch.object(mqtt_util, "command_callback", None):
+            mqtt_util.enqueue_request("read;0x1234;1")
+            mqtt_util.enqueue_request("read;0x1235;1")
+            self.assertEqual(mqtt_util.get_mqtt_request(), ("read;0x1234;1", None))
+            self.assertEqual(mqtt_util.get_mqtt_request(), ("read;0x1235;1", None))
 
     def test_readback_queue_coalesces(self):
         mqtt_util.force_delayed("temperature", 1)

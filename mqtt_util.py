@@ -30,7 +30,8 @@ import requests_util   # haus-fixes: is_write_command()
 verbose = False
 
 mqtt_client = None
-cmnd_queue = Queue(maxsize=128)  # (command, optional readback name)
+cmnd_queue = Queue(maxsize=128)  # (command/topic, optional /set payload, received time)
+optolink_ready = False
 
 recent_posts = {}
 _sentinel = object()  # eindeutiger Wert fuer "nicht vorhanden"
@@ -46,7 +47,7 @@ def on_connect(client, userdata, flags, reason_code, properties):
         return
     reset_recent_list()
     # publish LWT online
-    client.publish(settings.mqtt_topic + "/LWT" , "online", qos=0,  retain=True)
+    client.publish(settings.mqtt_topic + "/LWT", "online" if optolink_ready else "offline", qos=1, retain=True)
     # Subscribe to /set topics for writable datapoints
     subscriptions = [
         (settings.mqtt_topic + "/+/set", 0),
@@ -78,18 +79,11 @@ def on_message(client, userdata, msg):
     
     # Check if this is a /set topic
     if topic.endswith('/set') and settings.mqtt_topic and topic.startswith(settings.mqtt_topic + '/'):
-        handle_set_topic(topic, msg.payload)
+        enqueue_request(topic, msg.payload)
     elif topic == settings.mqtt_listen:
         rec = utils.bstr2str(msg.payload)
         rec = rec.replace(' ','').replace('\0','').replace('\n','').replace('\r','').replace('"','').replace("'","")
-        if(command_callback) and command_callback(rec):
-            pass
-        elif (not settings.cmnd_write_allowed) and requests_util.is_write_command(rec):
-            # haus-fixes: Schreibbefehle ueber das cmnd-Topic gesperrt (/set bleibt moeglich)
-            logger.warning(f"MQTT write command rejected (cmnd_write_allowed=False): {rec}")
-            publish_response("write commands disabled")
-        else:
-            enqueue_request(rec)
+        enqueue_request(rec)
     else:
         # Ausgabe anderer eingehenden MQTT-Nachrichten
         logger.warning(f"MQTT recd: Topic = {msg.topic}, Payload = {msg.payload}")
@@ -130,7 +124,7 @@ def connect_mqtt():
     mqtt_client.on_connect = on_connect
     mqtt_client.on_disconnect = on_disconnect
     mqtt_client.on_message = on_message
-    mqtt_client.will_set(settings.mqtt_topic + "/LWT", "offline", qos=0, retain=True)
+    mqtt_client.will_set(settings.mqtt_topic + "/LWT", "offline", qos=1, retain=True)
     if(settings.mqtt_listen != None):
         mqtt_client.on_subscribe = on_subscribe
     if(settings.mqtt_logging):
@@ -166,9 +160,9 @@ def connect_mqtt():
     #    raise Exception("Error connecting MQTT: " + str(e))
 
 
-def enqueue_request(command, readback=None):
+def enqueue_request(command, payload=None):
     try:
-        cmnd_queue.put_nowait((command, readback))
+        cmnd_queue.put_nowait((command, payload, time.monotonic()))
         return True
     except Full:
         logger.warning("MQTT command queue full")
@@ -178,9 +172,32 @@ def enqueue_request(command, readback=None):
 
 def get_mqtt_request():
     try:
-        return cmnd_queue.get_nowait()
+        command, payload, received = cmnd_queue.get_nowait()
     except Empty:
         return "", None
+    if time.monotonic() - received > 60:
+        logger.warning("Expired MQTT command discarded")
+        publish_response("command expired")
+        return "", None
+    if payload is not None:
+        return handle_set_topic(command, payload) or ("", None)
+    if command_callback and command_callback(command):
+        return "", None
+    if not settings.cmnd_write_allowed and requests_util.is_write_command(command):
+        logger.warning("MQTT write command rejected (cmnd_write_allowed=False)")
+        publish_response("write commands disabled")
+        return "", None
+    return command, None
+
+
+def set_optolink_ready(ready):
+    global optolink_ready
+    optolink_ready = bool(ready)
+    client = mqtt_client
+    if client is not None and client.is_connected():
+        client.publish(settings.mqtt_topic + "/LWT",
+                       "online" if optolink_ready else "offline",
+                       qos=1, retain=True)
 
 
 def clear_pending_requests():
@@ -230,7 +247,8 @@ def reset_recent_list():
 
 
 def exit_mqtt():
-    global mqtt_client
+    global mqtt_client, optolink_ready
+    optolink_ready = False
     client = mqtt_client
     if client is None:
         return
@@ -352,7 +370,7 @@ def handle_set_topic(topic, payload):
             write_cmd = f"write;{addr:#x};{length};{int_value}"
         
         logger.debug(f"Generated write command: {write_cmd}")
-        enqueue_request(write_cmd, dpname)
+        return write_cmd, dpname
 
     except: #Exception as e:
         logger.exception(f"handle_set_topic {topic}, {payload}")

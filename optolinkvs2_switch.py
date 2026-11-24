@@ -139,29 +139,8 @@ def do_poll_item(poll_data, ser:serial.serial_for_url, item_index:int=None) -> i
         return 0xFB
 
 
-# poll timer +++++++++++++++
-def on_polltimer():
-    global poll_pointer
-    if(poll_pointer > poll_list.num_items):
-        poll_pointer = 0
-    startPollTimer(settings.poll_interval)
-
-timer_pollinterval = threading.Timer(1.0, on_polltimer)
-
-def startPollTimer(secs:float):
-    global timer_pollinterval
-    timer_pollinterval.cancel()
-    timer_pollinterval = threading.Timer(secs, on_polltimer)
-    timer_pollinterval.start()
-
-
-def olbreath(retcode:int):
-    """
-    give vitotronic some time between comms to do other things
-    """
-    global last_vs1_comm
-    if(retcode <= 0x03):
-        # success, err msg
+# poll timing is managed by the main loop (monotonic clock, no timer thread).
+# success, err msg
         if(settings.vs1protocol):
             last_vs1_comm = time.monotonic()
             vs12_adapter.reset_vs1sync()
@@ -185,9 +164,10 @@ def vicon_thread_func(serViCon, serViDev):
     print("running Vitoconnect listener")
     try:
         callback = mqtt_publ_viconn if settings.viconn_to_mqtt else None
-        viconn_util.exit_flag = False
         viconn_util.listen_to_Vitoconnect(serViCon, callback)
     except Exception as e:
+        if viconn_util.exit_flag:
+            return
         msg = f"Error in listen_to_Vitoconnect: {e}"
         viconnlog.do_log(msg)
         logger.error(f"{msg} -> re-init")
@@ -198,16 +178,26 @@ def vicon_thread_func(serViCon, serViDev):
 
 
 # TCP loop +++++++++++++++++++++++++++++
-def tcp_connection_loop():
+def tcp_connection_loop(stop_event):
     global tcp_server
-    while(not progr_exit_flag):
-        tcp_server = c_tcpserver.TcpServer(settings.tcpip_host, settings.tcpip_port, settings.tcp_verbose, settings.tcp_legacy_idle)   # haus-fixes: Host einstellbar
-        tcp_server.command_callback = do_special_command        # type: ignore
-        tcp_server.run()
-        tcp_server = None
-        if progr_exit_flag: return
-        #logger.info("TCP session closed, restart soon...")
-        time.sleep(1)
+    while not stop_event.is_set():
+        session = None
+        try:
+            session = c_tcpserver.TcpServer(
+                settings.tcpip_host, settings.tcpip_port,
+                settings.tcp_verbose, settings.tcp_legacy_idle)
+            session.command_callback = do_special_command
+            tcp_server = session
+            if not stop_event.is_set():
+                session.run()
+        except (OSError, ValueError):
+            if not stop_event.is_set():
+                logger.exception("TCP server failed")
+        finally:
+            if session is not None:
+                session.stop()
+            tcp_server = None
+        stop_event.wait(1)
 
 
 # utils +++++++++++++++++++++++++++++
@@ -445,7 +435,9 @@ def main():
     excptn = None
     first_time = True
     reset_retry_counters_time = -1
-
+    tcp_thread = None
+    vicon_thread = None
+    tcp_stop_event = threading.Event()
 
     # === the method for a clean exit =============================
     def close_everything():
@@ -458,23 +450,42 @@ def main():
         progr_exit_flag = True
         # Schliessen der seriellen Schnittstellen, Ausgabedatei, PollTimer, 
         logger.info("exit close...")
-        logger.info("cancel poll timer") 
-        timer_pollinterval.cancel()
-        if(tcp_server is not None):
-            tcp_server.stop()
+        tcp_stop_event.set()
         viconn_util.exit_flag = True
-        if(serVitoConnnect is not None):
-            logger.info("closing serVitoConnnect")
-            serVitoConnnect.close()
-            serVitoConnnect = None  #?
-        if(serOptolink is not None):
-            if(serOptolink.is_open and (not isinstance(excptn, OSError))):
-                logger.info("reset Optolink protocol")
-                serOptolink.write(bytes([0x04]))
-            logger.info("closing serOptolink")
-            serOptolink.close()
-        if(mod_mqtt is not None):
-            mod_mqtt.exit_mqtt()
+        session = tcp_server
+        if session is not None:
+            session.stop()
+        # Closing the ports interrupts a blocked listener. Always join the old
+        # threads before a new session can reset their stop flags.
+        if serVitoConnnect is not None:
+            try:
+                serVitoConnnect.close()
+            except Exception:
+                logger.exception("closing Vitoconnect")
+            serVitoConnnect = None
+        for worker in (tcp_thread, vicon_thread):
+            if worker is not None:
+                worker.join(timeout=5)
+                if worker.is_alive():
+                    logger.error("Worker did not stop; refusing in-process restart")
+                    utils.shutdown_event.set()
+        if serOptolink is not None:
+            try:
+                if serOptolink.is_open and not isinstance(excptn, OSError):
+                    serOptolink.write(bytes([0x04]))
+            except Exception:
+                logger.exception("reset Optolink protocol")
+            finally:
+                try:
+                    serOptolink.close()
+                except Exception:
+                    logger.exception("closing Optolink")
+                serOptolink = None
+        if mod_mqtt is not None:
+            try:
+                mod_mqtt.exit_mqtt()
+            except Exception:
+                logger.exception("closing MQTT")
         if(viconnlog.log_handle is not None):
             logger.info("closing viconnlog")
             viconnlog.close_log()
@@ -486,6 +497,9 @@ def main():
     # the re-start loop
     # ++++++++++++++++++++      
     while not utils.shutdown_event.is_set():
+        tcp_thread = None
+        vicon_thread = None
+        tcp_stop_event = threading.Event()
         try:
         #if True:
 
@@ -577,7 +591,7 @@ def main():
 
             # TCP/IP connection --------
             if(settings.tcpip_port is not None):
-                tcp_thread = threading.Thread(target=tcp_connection_loop, daemon=True)
+                tcp_thread = threading.Thread(target=tcp_connection_loop, args=(tcp_stop_event,), daemon=True)
                 tcp_thread.start()
 
             # ---------------------
@@ -619,6 +633,7 @@ def main():
                 # listen to vicon ++++++++++++
                 # run reception thread
                 
+                viconn_util.exit_flag = False
                 vicon_thread = threading.Thread(target=vicon_thread_func, args=(serVitoConnnect, serOptolink), daemon=True)
                 vicon_thread.start()
 
@@ -630,9 +645,11 @@ def main():
                 logger.info(f"{spr} protocol initialized")
 
 
-            # Polling Mechanismus --------
-            if(settings.poll_interval > 0) and (poll_list.num_items > 0):
-                startPollTimer(settings.poll_interval)
+            if mod_mqtt is not None:
+                mod_mqtt.set_optolink_ready(True)
+            # Preserve periodic cycle semantics without recurring Timer threads.
+            poll_interval = settings.poll_interval
+            next_poll_at = time.monotonic() + max(0, poll_interval)
 
             # main loop initialisieren --------
             num_tasks = 3
@@ -643,7 +660,17 @@ def main():
             # +++++++++++++++++++++++++++            
             # main loop - Sachen abarbeiten 
             # +++++++++++++++++++++++++++            
-            while not utils.restart_event.is_set():  #and not shutdown_event.is_set():
+            while not utils.restart_event.is_set():
+                now = time.monotonic()
+                if settings.poll_interval != poll_interval:
+                    poll_interval = settings.poll_interval
+                    next_poll_at = now + max(0, poll_interval)
+                if poll_interval > 0 and now >= next_poll_at:
+                    if poll_pointer > poll_list.num_items:
+                        poll_pointer = 0
+                    next_poll_at = now + poll_interval
+                elif poll_interval == 0 and poll_pointer > poll_list.num_items:
+                    poll_pointer = 0
                 # inits
                 did_vicon_request = False
                 did_secodary_request = False
@@ -754,8 +781,8 @@ def main():
 
                     # TCP/IP request --------
                     elif(is_on == 2):
-                        if(tcp_server is not None):
-                            session = tcp_server
+                        session = tcp_server
+                        if session is not None:
                             msg = session.get_request()
                             if(msg):
                                 #print(f"recd tcp msg: {msg}")  #temp
@@ -811,7 +838,7 @@ def main():
                 return
             elif num_restarts >= settings.max_restarts:
                 logger.error("too many restarts - exit script")
-                return
+                raise SystemExit(1)
             else:
                 logger.info(f"waiting {settings.restart_delay}s before re-start...")
                 utils.shutdown_event.wait(settings.restart_delay)
