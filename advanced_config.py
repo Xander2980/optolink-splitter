@@ -34,6 +34,8 @@ class AdvancedConfig:
     verified_writes: bool = False
     write_min_interval: float = 2
     detect_device: bool = True
+    firmware_datapoint: object = None
+    mqtt_discovery: bool = False
     device_profiles: dict = field(default_factory=dict)
     require_profile_for_writes: bool = False
 
@@ -46,7 +48,7 @@ class AdvancedConfig:
         except TypeError as exc:
             raise ValueError("Unknown advanced configuration key") from exc
         for name in ("enabled", "web_enabled", "read_only", "verified_writes",
-                     "detect_device", "require_profile_for_writes"):
+                     "detect_device", "require_profile_for_writes", "mqtt_discovery"):
             if type(getattr(obj, name)) is not bool:
                 raise ValueError(name + " must be boolean")
         if type(obj.web_port) is not int or not 1 <= obj.web_port <= 65535:
@@ -81,6 +83,9 @@ class AdvancedConfig:
             raise ValueError("Invalid unchanged_warning_seconds")
         if any(not isinstance(v, str) or not v for v in obj.heating_names.values()):
             raise ValueError("heating_names must map roles to datapoint names")
+        fw = obj.firmware_datapoint
+        if fw is not None and (not isinstance(fw, (tuple, list)) or len(fw) != 2 or type(fw[0]) is not int or not 0 <= fw[0] <= 65535 or type(fw[1]) is not int or not 1 <= fw[1] <= 250):
+            raise ValueError("firmware_datapoint must be (address, length) or None")
         for ident, profile in obj.device_profiles.items():
             if len(ident) != 8 or any(c not in "0123456789abcdef" for c in ident):
                 raise ValueError("Device profile key must be lowercase 4-byte hex")
@@ -100,7 +105,7 @@ class AdvancedConfig:
                     addr = int(address, 16)
                 except ValueError as exc:
                     raise ValueError("Invalid profile address") from exc
-                if (not 0 <= addr <= 65535 or not isinstance(rule, dict)
+                if (address != '%04x' % addr or not 0 <= addr <= 65535 or not isinstance(rule, dict)
                         or type(rule.get("length")) is not int or not 1 <= rule["length"] <= 250
                         or not bounds(rule.get("raw_limits"))
                         or type(rule.get("signed", False)) is not bool):

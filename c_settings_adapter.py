@@ -66,6 +66,7 @@ class SettingsAdapter:
         # Write protection (haus-fixes) +++
         self.cmnd_write_allowed = True          # False: MQTT/TCP commands write/writeraw/raw/request/fullraw are rejected (only reads allowed; /set stays possible)
         self.set_write_allowlist = None        # None: legacy; empty collection: disable /set
+        self.advanced = {}                     # optional advanced branch settings
         self.write_limits = {}                  # optional per datapoint name: {'neigung_hk1': (0.2, 3.5), ...} – /set values outside are rejected
 
         # TCP/IP ++++++++++++++++++++++++++
@@ -196,6 +197,7 @@ class SettingsAdapter:
         # Write protection (haus-fixes) +++
         self.cmnd_write_allowed = getattr(self._settings_obj, 'cmnd_write_allowed', self.cmnd_write_allowed)
         self.set_write_allowlist = getattr(self._settings_obj, 'set_write_allowlist', self.set_write_allowlist)
+        self.advanced = getattr(self._settings_obj, 'advanced', self.advanced)
         self.write_limits = getattr(self._settings_obj, 'write_limits', self.write_limits)
 
         # TCP/IP ++++++++++++++++++++++++++
@@ -245,6 +247,8 @@ class SettingsAdapter:
         return True
 
     def validate(self) -> None:
+        from advanced_config import AdvancedConfig
+        AdvancedConfig.parse(self.advanced)
         def number(name, minimum, integer=False):
             value = getattr(self, name)
             if (type(value) not in (int, float) or not math.isfinite(value)

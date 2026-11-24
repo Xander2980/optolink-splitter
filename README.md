@@ -258,3 +258,28 @@ Optional settings in `settings_ini.py` (defaults in `settings_ini.py.example`):
 MQTT keeps the original data topics and combined `<base>/LWT`. The additional `<base>/status/optolink` reports protocol readiness while MQTT is connected; `stats` reports both connection states. Each polling datapoint publishes retained `<base>/quality/<name>` (online/offline) and `<base>/quality/<name>/last_success` (Unix timestamp or null). Re-run the existing Home Assistant discovery publisher for new per-datapoint availability on supported single-state entities. Existing discovery configurations remain usable. The combined LWT remains authoritative after a broker disconnect because MQTT permits only one Last Will per client.
 
 Hardware-free checks: `python -m compileall -q .` and `python -m unittest discover -s tests -v`. Validate the serial protocol and actual Raspberry Pi hardware before production deployment.
+
+
+## Advanced branch: local Control Center
+
+The optional advanced modules run inside the splitter, without new runtime packages. They do not add automatic heating control. The dashboard is read-only and defaults to `http://127.0.0.1:8080/` on the Pi. For secure remote access use `ssh -L 8080:127.0.0.1:8080 pi@<pi-ip>`, then open `http://localhost:8080/` on your computer. To enable LAN access explicitly, set `web_host` to the Pi's LAN address and provide the service environment variable `OPTOLINK_WEB_PASSWORD` (minimum 12 characters; username `optolink`). HTTP Basic authentication is not encrypted; use only a trusted isolated LAN or an existing TLS reverse proxy. Never expose this port publicly. No web write endpoints exist. The HTTP API is `GET /api/status`.
+
+All settings are in the `advanced` dictionary in `settings_ini.py.example`. Restart the service after changing these settings. The existing poll list and MQTT topics are preserved. The scheduler takes ownership only of explicitly configured override names with positive legacy cycle groups. Other points follow legacy cycles; errors on managed points cause cooldown and repeated device errors are marked suspected unsupported, not deleted. Existing same-address byte/bit coalescing remains for legacy polls. Bus-load estimation is for override jobs only, not total physical bus utilization. No speculative reads spanning unverified memory addresses are made.
+
+To enable heating statistics map the actual poll-list names in `heating_names` using roles `burner` (0/1), `modulation` (percent), `boiler`, `boiler_target`, `flow`, `return` (temperatures in °C). Choose short enough read intervals; missing or old observations are not extrapolated. The starts today and rolling counts are observation-based since service start, not the controller's lifetime counters. The local history is bounded and RAM-only. The unchanged-value rule is a warning, not evidence of a broken sensor. Set plausibility ranges only for documented values/units.
+
+The device identification reads four bytes at 0x00f8 and reports raw hex; model/firmware labels require a verified user-provided mapping. `firmware_datapoint` can specify a verified read-only address and length; it reports raw hex. Profiles use the exact fingerprint as a key; example shape (placeholders, NOT real device values):
+
+```python
+# Replace with actual verified fingerprint, name, address and raw value limits.
+# Do not copy arbitrary addresses into a production profile.
+# advanced["device_profiles"] = {
+#     "00000000": {"name": "verified model", "firmware": "verified version",
+#                  "expected_datapoints": ["exact poll name"],
+#                  "writable": {"1234": {"length": 1, "raw_limits": (0, 0), "signed": False}}}
+# }
+```
+
+`read_only` blocks MQTT/TCP writes, including opaque raw/request messages (Vitoconnect pass-through is intentionally unaffected). `verified_writes` is opt-in for readback-compatible writes: pre-read, suppress unchanged writes, rate limit, issue once, read back, compare, audit UUID. With verification or profile enforcement enabled opaque commands are rejected. A matching profile restricts explicit writes to its raw bounds; use `require_profile_for_writes` to fail closed on unknown devices. Existing `cmnd_write_allowed`, `set_write_allowlist` and `write_limits` still apply. No automatic retry/rollback of writes. A verification error means the outcome is uncertain, not that the write was undone.
+
+Advanced telemetry is published under `<base>/advanced/{system,communication,heating,queues,device}` as JSON, with numeric subtopics and `<base>/advanced/errors`. Optional `mqtt_discovery` creates diagnostic sensors. Data freshness is still provided by the robustness branch; HTTP shows invalid values explicitly. A 100-entry error ring and 100-entry write audit are kept in RAM. The serial I/O counts refer to calls/bytes; transaction counters measure secondary/poll requests and forwarded responses, not physical frame counts. Verify actual device compatibility on the Raspberry Pi before deployment.

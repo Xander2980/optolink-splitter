@@ -1,9 +1,9 @@
 name: Python regression tests
 on:
   push:
-    branches: [raspi-robustness, main]
+    branches: [raspi-robustness, raspi-advanced, main]
   pull_request:
-    branches: [main]
+    branches: [main, raspi-robustness]
 permissions:
   contents: read
 jobs:

@@ -25,6 +25,7 @@ import signal
 from dataclasses import dataclass, field
 from typing import Any, Optional
 from runtime_support import MeasurementTracker, reconnect_delay, freshness_deadline, valid_measurement
+from advanced_runtime import AdvancedRuntime
 
 from c_settings_adapter import settings  # to be done first to get logger settings
 from logger_util import logger
@@ -54,6 +55,7 @@ class RuntimeState:
     manual_poll: bool = False
     optolink_ready: bool = False
     measurements: MeasurementTracker = field(default_factory=MeasurementTracker)
+    advanced: Optional[AdvancedRuntime] = None
 
 
 state = RuntimeState()
@@ -66,6 +68,9 @@ def mqtt_connected() -> bool:
 
 def record_measurement(name: str, addr: int, value: Any) -> bool:
     if not valid_measurement(value):
+        state.measurements.invalidate(name)
+        return False
+    if state.advanced and not state.advanced.diag.observe(name, value, time.monotonic(), time.time()):
         state.measurements.invalidate(name)
         return False
     was_valid = state.measurements.values.get(name)
@@ -82,7 +87,12 @@ def quality_tick(now: float) -> None:
                                     poll_list.cycle_groups[item[0]], settings.poll_stale_after)
         for item in poll_list.items
     }
+    if state.advanced:
+        for name, job in state.advanced.scheduler.jobs.items():
+            deadlines[name] = settings.poll_stale_after or max(15, 3 * job.interval)
     state.measurements.expire(now, deadlines)
+    if state.advanced:
+        state.advanced.tick(state, mqtt_connected(), now)
     if mqtt_connected():
         for name in list(state.measurements.dirty)[:64]:
             if state.mqtt.publish_quality(name, state.measurements.values[name]):
@@ -102,8 +112,9 @@ def do_poll_item(poll_data: list, ser: serial.Serial, item_index: Optional[int] 
             list_index = item_index if item_index is not None else state.poll_pointer
             item = poll_list.items[list_index]  # (PollCycleGroupKey, Name, DpAddr, Len, Scale/Type, Signed)
             item_cycle = poll_list.cycle_groups[item[0]]
+            managed = (state.advanced and state.advanced.scheduler.owns(item[1]) and not state.manual_poll)
 
-            if(item_index is None) and ((item_cycle < 0) or ((item_cycle > 0) and (state.poll_cycle % item_cycle != 0)) or ((item_cycle == 0) and (state.poll_cycle != 0))):
+            if(item_index is None) and (managed or (item_cycle < 0) or ((item_cycle > 0) and (state.poll_cycle % item_cycle != 0)) or ((item_cycle == 0) and (state.poll_cycle != 0))):
                 # ---------------------------------------
                 # +++ do NOT poll this item this time +++
                 # ---------------------------------------
@@ -121,7 +132,10 @@ def do_poll_item(poll_data: list, ser: serial.Serial, item_index: Optional[int] 
                 break
 
         for attempt in range(settings.poll_read_retries + 1):
-            retcode, data, val, _ = requests_util.response_to_request(item, ser)
+            if state.advanced:
+                retcode, data, val, _ = state.advanced.request(item, ser, 'poll')
+            else:
+                retcode, data, val, _ = requests_util.response_to_request(item, ser)
             if retcode == 0xAA:
                 raise serial.SerialException("Optolink USB connection lost")
             if (retcode not in (0x15, 0x20, 0x41, 0xFC, 0xFD, 0xFE, 0xFF)
@@ -144,6 +158,8 @@ def do_poll_item(poll_data: list, ser: serial.Serial, item_index: Optional[int] 
                     while((list_index + 1) < poll_list.num_items):
                         list_index += 1
                         next_item = poll_list.items[list_index]
+                        if state.advanced and (state.advanced.scheduler.owns(next_item[1]) or item_index is not None):
+                            break
                         #next_item_cycle = poll_list.cycle_groups[next_item[0]]
                         # remove PollCycleGroupKey
                         next_item = next_item[1:]
@@ -461,7 +477,7 @@ def handle_exit(sig, frame):
 # ------------------------
 # Main
 # ------------------------
-def main() -> None:
+def run_main() -> None:
 
     settings.validate()
     # Signale abfangen fuer sauberes Beenden
@@ -494,6 +510,10 @@ def main() -> None:
         logger.info("exit close...")
         state.optolink_ready = False
         state.measurements.invalidate_all()
+        if state.advanced:
+            state.advanced.diag.heating.invalidate()
+            state.advanced.diag.set_device(None, ())
+            state.advanced.tick(state, mqtt_connected(), time.monotonic(), force=True)
         if state.mqtt is not None:
             try:
                 state.mqtt.set_optolink_ready(False)
@@ -565,6 +585,8 @@ def main() -> None:
                 if not poll_list.make_list():
                     raise SystemExit("Initial poll list could not be loaded")
                 state.measurements.configure(poll_list.datapoint_metadata)
+                if state.advanced:
+                    state.advanced.configure(poll_list)
                 # buffer for read data for writing viessdata.csv 
                 poll_data = [None] * poll_list.num_items
 
@@ -582,6 +604,8 @@ def main() -> None:
                 state.manual_poll = False
                 poll_data = [None] * poll_list.num_items
                 state.measurements.configure(poll_list.datapoint_metadata)
+                if state.advanced:
+                    state.advanced.configure(poll_list)
                 excptn = None
                 #reset_retry_counters_in(settings.retry_counters_reset)
                 reset_retry_counters_time = time.monotonic() + (60 * settings.retry_counters_reset)
@@ -617,6 +641,9 @@ def main() -> None:
                 else:
                     serOptolink = serial.serial_for_url(**serial_args)      # type: ignore
 
+                if state.advanced:
+                    serOptolink = state.advanced.wrap_serial(serOptolink)
+                    state.advanced.diag.counters["usb_opens"] += 1
                 # open went fine
                 logger.info(f"Optolink serial port opened on {settings.port_optolink}")
             else:
@@ -707,6 +734,8 @@ def main() -> None:
 
             if utils.shutdown_event.is_set():
                 break
+            if state.advanced:
+                state.advanced.identify(serOptolink, poll_list, olbreath)
             state.optolink_ready = True
             if state.mqtt is not None:
                 state.mqtt.set_optolink_ready(True)
@@ -717,7 +746,7 @@ def main() -> None:
             mqtt_generation = -1
 
             # main loop initialisieren --------
-            num_tasks = 3
+            num_tasks = 4 if state.advanced else 3
             request_pointer = 0
             #tprev = int(time.time()*10000)
             logger.info("enter main loop")
@@ -732,6 +761,9 @@ def main() -> None:
                     mqtt_generation = state.mqtt.connection_generation
                     state.measurements.invalidate_all()
                     state.measurements.republish()
+                    if state.advanced:
+                        state.advanced.scheduler.reset(now)
+                        state.advanced.diag.last_tick = float('-inf')
                     # Refresh all values, including once-only items; do not mark stale values online.
                     state.poll_pointer = 0
                     state.poll_cycle = 0
@@ -762,7 +794,10 @@ def main() -> None:
                         viconnlog.do_log(vidata, "M")
                         # recive response an pass bytes directly back to VitoConnect, 
                         # returns when response is complete (or error or timeout) 
+                        started = time.monotonic()
                         retcode, _, redata = vs12_adapter.receive_telegr(True, True, serOptolink, serVitoConnnect, vicon_publ_callback)     # type: ignore
+                        if state.advanced:
+                            state.advanced.diag.transaction(retcode, time.monotonic()-started, 'vitoconnect', data=redata)
                         if retcode == 0xAA:
                             raise serial.SerialException("Optolink USB connection lost")
                         viconnlog.do_log(redata, f"S {retcode:02x}")
@@ -794,6 +829,8 @@ def main() -> None:
                                     state.mqtt.clear_pending_requests()
                                 if poll_list.make_list(reload=True):
                                     state.measurements.configure(poll_list.datapoint_metadata)
+                                    if state.advanced:
+                                        state.advanced.configure(poll_list)
                                     poll_data = [None] * poll_list.num_items
                                 else:
                                     logger.error("Poll reload rejected; retaining previous list")
@@ -819,6 +856,8 @@ def main() -> None:
                                 # +++ everything to be done after poll cycle completed ++++++++++
                                 if(state.poll_pointer >= poll_list.num_items):
                                     state.manual_poll = False
+                                    if state.advanced:
+                                        state.advanced.diag.counters['poll_cycles'] += 1
                                     # Viessdata csv
                                     if(settings.write_viessdata_csv):
                                         viessdata_util.buffer_csv_line([
@@ -857,7 +896,10 @@ def main() -> None:
                             msg, readback = state.mqtt.get_mqtt_request()
                             if(msg):
                                 try:
-                                    retcode, _, _, resp = requests_util.response_to_request(msg, serOptolink)
+                                    if state.advanced:
+                                        retcode, _, _, resp = state.advanced.request(msg, serOptolink, 'mqtt', olbreath)
+                                    else:
+                                        retcode, _, _, resp = requests_util.response_to_request(msg, serOptolink)
                                     if retcode == 0xAA:
                                         raise serial.SerialException("Optolink USB connection lost")
                                     state.mqtt.publish_response(resp)
@@ -885,7 +927,10 @@ def main() -> None:
                                         logger.warning(f"TCP write command rejected (cmnd_write_allowed=False): {msg}")
                                         session.send("write commands disabled")
                                     else:
-                                        retcode, _, _, resp = requests_util.response_to_request(msg, serOptolink)
+                                        if state.advanced:
+                                            retcode, _, _, resp = state.advanced.request(msg, serOptolink, 'tcp', olbreath)
+                                        else:
+                                            retcode, _, _, resp = requests_util.response_to_request(msg, serOptolink)
                                         if retcode == 0xAA:
                                             raise serial.SerialException("Optolink USB connection lost")
                                         #print(f"retcode {retcode}, try to send tcp: {resp}")  #temp
@@ -899,6 +944,15 @@ def main() -> None:
         
                     #print(f"{((tnow := int(time.time()*10000)) - tprev)} ds {did_secodary_request}"); tprev = tnow
                             
+                    elif is_on == 3 and state.advanced and settings.poll_interval >= 0:
+                        job = state.advanced.scheduler.choose(time.monotonic())
+                        if job:
+                            name, index = job
+                            started = time.monotonic()
+                            retcode = do_poll_item(poll_data, serOptolink, item_index=index)
+                            state.advanced.scheduler.complete(name, retcode, time.monotonic(), time.monotonic()-started+settings.olbreath)
+                            did_secodary_request = True
+
                     if (did_secodary_request):
                         olbreath(retcode)
                         break
@@ -933,6 +987,8 @@ def main() -> None:
             usb_failure = True
             excptn = e
             logger.warning(f"Serial/IO connection failed: {e}")
+            if state.advanced:
+                state.advanced.diag.counters['usb_io_failures'] += 1
         except Exception as e:
             non_usb_failures += 1
             logger.exception("main")
@@ -954,6 +1010,20 @@ def main() -> None:
         delay = reconnect_delay(settings.restart_delay, settings.restart_max_delay, state.num_restarts + 1)
         logger.info(f"waiting {delay}s before re-start...")
         utils.shutdown_event.wait(delay)
+
+
+def main() -> None:
+    state.advanced = AdvancedRuntime(settings.advanced)
+    if not state.advanced.config.enabled:
+        state.advanced = None
+    try:
+        if state.advanced:
+            state.advanced.start()
+        run_main()
+    finally:
+        if state.advanced:
+            state.advanced.stop()
+            state.advanced = None
 
 
 if __name__ == "__main__":

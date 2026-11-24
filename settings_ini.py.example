@@ -100,3 +100,30 @@ w1sensors = {
 
 
 
+
+
+# Advanced diagnostics (optional; no extra services or runtime packages).
+# Default dashboard binds only to localhost. Use SSH forwarding for remote access.
+advanced = {
+    "enabled": True,
+    "web_enabled": True,
+    "web_host": "127.0.0.1",
+    "web_port": 8080,
+    # "web_host": "0.0.0.0",  # requires OPTOLINK_WEB_PASSWORD >= 12 chars; trusted LAN only
+    "telemetry_interval": 10,
+    "history_points": 720,
+    "poll_overrides": {},  # exact poll-list names: {"name": {"seconds": 5, "priority": 8}}
+    "plausibility": {},    # exact names: {"name": (-40, 100)}; use correct units
+    "unchanged_warning_seconds": {},
+    "heating_names": {},   # map roles burner, modulation, boiler, boiler_target, flow, return to exact poll-list names
+    "heating_max_gap": 30,
+    "short_burn_seconds": 300,
+    "read_only": False,     # blocks ALL secondary MQTT/TCP writes, including raw commands; not Vitoconnect
+    "verified_writes": False,  # opt in after confirming readback-compatible addresses
+    "write_min_interval": 2,
+    "detect_device": True,
+    "firmware_datapoint": None,  # (verified address, length); raw hex, never guessed
+    "device_profiles": {},  # exact 4-byte identity -> validated profile; see README
+    "require_profile_for_writes": False,
+    "mqtt_discovery": False,
+}

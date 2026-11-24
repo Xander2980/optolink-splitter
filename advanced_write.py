@@ -39,9 +39,10 @@ def guarded_write(command, source, diag, read, execute, pause):
     except (ValueError, IndexError, OverflowError):
         return reject("invalid_command")
     if parsed is None:
-        if cfg.verified_writes or cfg.require_profile_for_writes:
+        if cfg.verified_writes or cfg.require_profile_for_writes or diag.profile is not None:
             return reject("opaque_command")
-        return finish("unverified_legacy", execute())
+        result = execute()
+        return finish("unverified_legacy" if result[0] == 1 else "failed", result)
     addr, target = parsed
     event.update(address="0x%04x" % addr, requested=target.hex())
     profile = diag.profile

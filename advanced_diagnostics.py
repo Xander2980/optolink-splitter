@@ -1,7 +1,10 @@
 """Bounded system and heating diagnostics; all mutation occurs on the bus worker."""
 import math
 import time
-import resource
+try:
+    import resource
+except ImportError:
+    resource = None
 from pathlib import Path
 from collections import Counter, deque
 from datetime import datetime
@@ -18,7 +21,8 @@ def read_system():
     result = {}
     try:
         # Linux ru_maxrss is KiB; /proc gives current resident size.
-        result["ram_peak_mib"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 2)
+        if resource is not None:
+            result["ram_peak_mib"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 2)
         for line in Path("/proc/self/status").read_text().splitlines():
             if line.startswith("VmRSS:"):
                 result["ram_mib"] = round(int(line.split()[1]) / 1024, 2)
@@ -51,11 +55,13 @@ class Heating:
     def invalidate(self):
         self.previous = self.transition = self.kessel = self.slope = None
 
-    def observe(self, active, modulation, boiler, now, wall):
+    def observe(self, active, modulation, boiler, now, wall, *, burner_sample=True, boiler_sample=True):
         day = datetime.fromtimestamp(wall).date()
         if day != self.day:
             self.day, self.starts_today = day, 0
-        if active not in (0, 1):
+        if not burner_sample:
+            pass
+        elif active not in (0, 1):
             self.previous = self.transition = None
         else:
             if self.previous is not None:
@@ -75,6 +81,8 @@ class Heating:
                 else:
                     self.transition = None
             self.previous = now, active, modulation
+        if not boiler_sample:
+            return
         if boiler is not None:
             if self.kessel:
                 before, old = self.kessel
@@ -135,6 +143,10 @@ class Diagnostics:
         self.counters["transactions"] += 1
         self.counters["success"] += int(code == 1)
         self.counters["code_%02x" % code] += 1
+        if code == 0xFE:
+            self.counters['crc_errors'] += 1
+        elif code == 0xFF:
+            self.counters['timeouts'] += 1
         self.latencies.append(max(0, elapsed) * 1000)
         if code != 1:
             kind = "device" if code == 3 else "decode" if code == 0xFB else "transport"
@@ -152,6 +164,16 @@ class Diagnostics:
         old = self.points.get(name)
         changed = now if old is None or value != old["value"] else old["changed"]
         self.points[name] = {"value": value, "at": now, "wall": wall, "changed": changed}
+        roles = self.config.heating_names
+        def recent(role):
+            point = self.points.get(roles.get(role))
+            return number(point["value"]) if point and now - point["at"] <= self.config.heating_max_gap else None
+        if name == roles.get("burner") or name == roles.get("boiler"):
+            mod = recent("modulation")
+            self.heating.observe(recent("burner"), mod if mod is not None and 0 <= mod <= 100 else None,
+                                 recent("boiler"), now, wall,
+                                 burner_sample=name == roles.get("burner"),
+                                 boiler_sample=name == roles.get("boiler"))
         return True
 
     def configure_points(self, names):
@@ -160,7 +182,7 @@ class Diagnostics:
 
     def set_device(self, ident, names):
         self.profile = self.config.device_profiles.get(ident)
-        self.device = {"id": ident, "profile": self.profile.get("name") if self.profile else None,
+        self.device = {"id": ident, "firmware_raw": None, "profile": self.profile.get("name") if self.profile else None,
                        "firmware": self.profile.get("firmware") if self.profile else None,
                        "missing_configured_points": sorted(set(self.profile.get("expected_datapoints", [])) - set(names)) if self.profile else []}
 
@@ -170,9 +192,10 @@ class Diagnostics:
             return None
         self.last_tick = now
         point_rows = {}
-        for name, point in self.points.items():
+        for name in quality:
+            point = self.points.get(name, {"value": None, "wall": None, "changed": now})
             status = quality.get(name)
-            valid = bool(ready and status and status.valid)
+            valid = bool(ready and status and status.valid and name in self.points)
             unchanged = self.config.unchanged_warning_seconds.get(name)
             point_rows[name] = {"value": point["value"] if valid else None,
                                 "last_success": point["wall"], "valid": valid,
@@ -186,7 +209,10 @@ class Diagnostics:
         active, mod, boiler = role("burner"), role("modulation"), role("boiler")
         if mod is not None and not 0 <= mod <= 100:
             mod = None
-        self.heating.observe(active, mod, boiler, now, wall)
+        if active is None:
+            self.heating.previous = self.heating.transition = None
+        if boiler is None:
+            self.heating.kessel = self.heating.slope = None
         heat = self.heating.metrics(now, wall) if self.config.heating_names else {}
         flow, ret, target = role("flow"), role("return"), role("boiler_target")
         if self.config.heating_names:
@@ -205,6 +231,7 @@ class Diagnostics:
         stats["success_rate_pct"] = round(100*self.counters["success"]/total, 2) if total else None
         stats["response_mean_ms"] = round(sum(self.latencies)/len(self.latencies), 1) if self.latencies else None
         stats["response_max_ms"] = round(max(self.latencies), 1) if self.latencies else None
+        stats["slow_response_warning"] = bool(self.latencies and max(self.latencies) > 1000)
         stats["restarts"] = restarts
         stats["poll_estimated_utilization_pct"] = round(100*scheduler.utilization, 1)
         self.history.append({"time": wall, "boiler": boiler, "flow": flow, "return": ret,
